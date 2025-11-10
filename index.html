@@ -72,18 +72,6 @@
       opacity: 0;
       transition: opacity 0.1s ease;
     }
-    #statusText {
-      position: absolute;
-      bottom: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      font-size: 18px;
-      background: rgba(0,0,0,0.35);
-      color: #fff;
-      padding: 6px 12px;
-      border-radius: 12px;
-      pointer-events: none;
-    }
     #responseButtons {
       position: fixed;
       bottom: 32px;
@@ -122,7 +110,6 @@
     <div id="canvasWrapper">
       <canvas id="gaborCanvas"></canvas>
       <div id="feedbackOverlay"></div>
-      <div id="statusText"></div>
     </div>
     <div id="responseButtons">
       <button class="responseButton" data-key="a">选择 A 类（键盘 A）</button>
@@ -142,7 +129,7 @@
     const FEEDBACK_MS   = 700;
 
     const ORI_MIN = -15, ORI_MAX = 15;
-    const SF_LINES = [3, 4, 5, 6]; // We store the visible stripe count directly in the CSV.
+    const SF_LINES = [3, 4, 5, 6]; // We store the visible黑白成对条纹数量（cycle count）到 CSV。
 
     const ENFORCE_ORI_BUCKET_BALANCE = true;
     const ORI_BINS = [[-15,-9],[-9,-3],[-3,3],[3,9],[9,15]]; // Coarse bins kept for reference (fine-grained logic below).
@@ -169,7 +156,6 @@
     const canvas = document.getElementById('gaborCanvas');
     const ctx = canvas.getContext('2d');
     const feedbackOverlay = document.getElementById('feedbackOverlay');
-    const statusText = document.getElementById('statusText');
     const responseButtons = document.querySelectorAll('.responseButton');
 
     // -------------------------
@@ -525,7 +511,7 @@
       drawBackground();
     }
 
-    function drawGabor(ctx, cx, cy, diameterPx, oriDeg, sfLines) {
+    function drawGabor(ctx, cx, cy, diameterPx, oriDeg, sfPairs) {
       const size = Math.max(8, Math.round(diameterPx));
       const offCanvas = document.createElement('canvas');
       offCanvas.width = size;
@@ -535,11 +521,15 @@
       const data = imageData.data;
       const radius = size / 2;
       const orientation = oriDeg * Math.PI / 180;
-      // Stripe to frequency conversion: if sfLines is total visible stripes, cycles = sfLines/2.
-      const cycles = sfLines / 2;
-      const freq = cycles / size; // ensures diameter direction shows the target stripe count.
+      // 条纹换算：sfPairs 表示黑白为一组的可见条纹数量（cycle 数），freq=cycle/D 确保直径方向出现指定组数。
+      const cycles = sfPairs;
+      const freq = cycles / size;
       const cosOri = Math.cos(orientation);
       const sinOri = Math.sin(orientation);
+      const sigma = radius * 0.45;
+      const twoSigmaSq = 2 * sigma * sigma;
+      const base = 128;
+      const amplitude = 110;
       for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
           const dx = x - radius + 0.5;
@@ -555,8 +545,8 @@
           }
           const rotX = dx * cosOri + dy * sinOri;
           const sine = Math.cos(2 * Math.PI * freq * rotX);
-          // Hard-edged black/white stripes without Gaussian falloff.
-          const value = sine >= 0 ? 235 : 20;
+          const gaussian = Math.exp(-distSq / twoSigmaSq);
+          const value = clamp(Math.round(base + gaussian * amplitude * sine), 0, 255);
           data[idx] = value;
           data[idx + 1] = value;
           data[idx + 2] = value;
@@ -592,7 +582,10 @@
     }
 
     function updateStatus(text) {
-      statusText.textContent = text || '';
+      // Status提示已移除界面，此处仅为兼容保留。
+      if (text) {
+        console.log(text);
+      }
     }
 
     // -------------------------
