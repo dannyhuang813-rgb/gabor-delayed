@@ -683,15 +683,16 @@
           await wait(PREBLANK_MS);
           if (aborted) break;
         }
-        if (participantConfig.delayMs > 0) {
-          drawBlank();
-          await wait(participantConfig.delayMs);
-          if (aborted) break;
-        }
         renderStimulus(trial.sf, trial.ori);
         const response = await waitForResponse();
         clearResponseState();
         drawBlank();
+        if (participantConfig.delayMs > 0) {
+          drawFixation();
+          await wait(participantConfig.delayMs);
+          if (aborted) break;
+          drawBlank();
+        }
         if (response.aborted || aborted) {
           break;
         }
@@ -705,7 +706,7 @@
           respKey = 'NA';
         }
         const corr = respKey === trial.correctKey ? 1 : 0;
-        showFeedback(corr ? '正确' : '错误', corr ? '#2ecc71' : '#e74c3c');
+        showFeedback(corr ? 'Right' : 'Wrong', corr ? '#2ecc71' : '#e74c3c');
         await wait(FEEDBACK_MS);
         hideFeedback();
         if (aborted) break;
