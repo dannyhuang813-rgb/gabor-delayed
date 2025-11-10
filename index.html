@@ -131,17 +131,14 @@
     const ORI_MIN = -15, ORI_MAX = 15;
     const SF_LINES = [3, 4, 5, 6]; // We store the visible黑白成对条纹数量（cycle count）到 CSV。
 
-    const ENFORCE_ORI_BUCKET_BALANCE = true;
-    const ORI_BINS = [[-15,-9],[-9,-3],[-3,3],[3,9],[9,15]]; // Coarse bins kept for reference (fine-grained logic below).
-    const ORI_FINE_BALANCE = true;
-    const ORI_BIN_MODE = 'abs';
-    const ORI_FINE_DEGS = Array.from({ length: 15 }, (_, i) => i + 1);
     const ORI_JITTER = 0.5;
 
     const DEFAULT_RB_THRESHOLD = 7;
-    const DEFAULT_W_SF = 0.55;
-    const DEFAULT_W_ORI = 0.45;
-    const DEFAULT_II_BIAS = 0.90;
+    const WEIGHT_SET_A = { W_SF: 0.65, W_ORI: 0.35 }; // 密度优先
+    const WEIGHT_SET_B = { W_SF: 0.35, W_ORI: 0.65 }; // 方向优先
+    const DEFAULT_W_SF = 0.5;
+    const DEFAULT_W_ORI = 0.5;
+    const BASE_II_BIAS = 0; // score=0 切分线
     const DELAYED_STAGE_MS = 2500;
 
     const CSV_HEADER = ['participant','blockName','trialIndex','sf','ori','label','correctKey','resp','corr','rt','timeout','trialStartUTC'];
@@ -215,21 +212,6 @@
       }
     }
 
-    function computeFineBucketKey(oriDeg, mode = ORI_BIN_MODE) {
-      if (!ORI_FINE_BALANCE) return 'all';
-      const rounded = Math.round(oriDeg);
-      if (mode === 'signed') {
-        const clipped = clamp(rounded, ORI_MIN, ORI_MAX);
-        return `signed_${clipped}`;
-      }
-      const absRounded = Math.abs(rounded);
-      if (absRounded === 0) {
-        return 'abs_0';
-      }
-      const clipped = clamp(absRounded, 1, ORI_FINE_DEGS[ORI_FINE_DEGS.length - 1]);
-      return `abs_${clipped}`;
-    }
-
     // -------------------------
     // Participant driven configuration
     // -------------------------
@@ -238,7 +220,7 @@
       let rbThreshold = DEFAULT_RB_THRESHOLD;
       let wSf = DEFAULT_W_SF;
       let wOri = DEFAULT_W_ORI;
-      let iiBias = DEFAULT_II_BIAS;
+      let iiBias = BASE_II_BIAS;
       let delayMs = 0;
 
       const matchLetter = trimmed.match(/[a-zA-Z]/);
@@ -247,10 +229,13 @@
         const letter = matchLetter[0].toUpperCase();
         if (letter === 'A') {
           rbThreshold = 5;
+          wSf = WEIGHT_SET_A.W_SF;
+          wOri = WEIGHT_SET_A.W_ORI;
         } else if (letter === 'B') {
           rbThreshold = 10;
+          wSf = WEIGHT_SET_B.W_SF;
+          wOri = WEIGHT_SET_B.W_ORI;
         }
-        // II weights stay identical for both A/B per specification.
       }
       if (matchDigit) {
         const digit = matchDigit[0];
@@ -266,6 +251,7 @@
         W_SF: wSf,
         W_ORI: wOri,
         II_BIAS: iiBias,
+        II_DYNAMIC_BIAS: iiBias,
         delayMs
       };
     }
@@ -277,212 +263,221 @@
       return Math.abs(oriDeg) <= cfg.RB_ABS_ORI_THRESHOLD ? 'A' : 'B';
     }
 
-    function labelII(sfLines, oriDeg, cfg) {
+    function computeIIScoreComponents(sfLines, oriDeg, cfg) {
       const x = (sfLines - 4.5) / 1.5;
       const y = oriDeg / 15;
-      const score = cfg.W_SF * x + cfg.W_ORI * y - cfg.II_BIAS;
-      const label = score > 0 ? 'A' : 'B';
-      return { label, score };
+      return { x, y, score: cfg.W_SF * x + cfg.W_ORI * y };
     }
 
     // -------------------------
     // Stimulus generation helpers
     // -------------------------
-    function buildCandidatesRB(cfg, participantSeed) {
-      const targetCounts = { A: N_RB / 2, B: N_RB / 2 };
-      let replicates = 2;
-      let bucketData;
-      while (true) {
-        bucketData = generateCandidateBuckets('RB', cfg, participantSeed, replicates, true);
-        const counts = countBucketCandidates(bucketData);
-        if (counts.A >= targetCounts.A && counts.B >= targetCounts.B) {
-          break;
-        }
-        replicates += 1;
-        if (replicates > 8) break;
-      }
-      return assembleTrialsFromBuckets(bucketData, targetCounts, participantSeed + '_RB');
-    }
-
-    function buildCandidatesII(cfg, participantSeed) {
-      const targetCounts = { A: N_II / 2, B: N_II / 2 };
-      let replicates = 3;
-      let bucketData;
-      while (true) {
-        bucketData = generateCandidateBuckets('II', cfg, participantSeed, replicates, false);
-        const counts = countBucketCandidates(bucketData);
-        if (counts.A >= targetCounts.A && counts.B >= targetCounts.B) {
-          break;
-        }
-        replicates += 1;
-        if (replicates > 10) break;
-      }
-      return assembleTrialsFromBuckets(bucketData, targetCounts, participantSeed + '_II');
-    }
-
-    function countBucketCandidates(bucketData) {
-      return Object.values(bucketData).reduce((acc, bucket) => {
-        acc.A += bucket.A.length;
-        acc.B += bucket.B.length;
-        return acc;
-      }, { A: 0, B: 0 });
-    }
-
-    function generateCandidateBuckets(blockName, cfg, participantSeed, replicates, includeZeroOri) {
-      const rng = hashString(`${participantSeed}_${blockName}_gen_${replicates}`);
-      const buckets = {};
-      const ratio = ORI_FINE_BALANCE ? 1 : 0;
-      const oriInts = [];
-      for (let o = ORI_MIN; o <= ORI_MAX; o++) {
-        if (!includeZeroOri && o === 0) continue;
-        oriInts.push(o);
-      }
-      const totalRepeat = Math.max(replicates, 1);
-      for (const oriInt of oriInts) {
-        for (const sf of SF_LINES) {
-          for (let r = 0; r < totalRepeat; r++) {
-            const jitter = (rng() * 2 - 1) * ORI_JITTER;
-            const ori = clamp(oriInt + jitter, ORI_MIN, ORI_MAX);
-            let label;
-            let score = 0;
-            if (blockName === 'RB') {
-              label = labelRB(ori, cfg);
-            } else {
-              const res = labelII(sf, ori, cfg);
-              label = res.label;
-              score = res.score;
-            }
-            const bucketKey = computeFineBucketKey(ori, ORI_BIN_MODE);
-            if (!buckets[bucketKey]) {
-              buckets[bucketKey] = {
-                A: [],
-                B: [],
-                counts: { A: 0, B: 0 }
-              };
-            }
-            buckets[bucketKey][label].push({
-              sf,
-              ori,
-              label,
-              score: Math.abs(score),
-              blockName,
-              correctKey: label === 'A' ? 'a' : 'b'
-            });
-          }
+    function buildSfSchedule(total, seed) {
+      const perLevel = Math.floor(total / SF_LINES.length);
+      let remainder = total - perLevel * SF_LINES.length;
+      const schedule = [];
+      for (const sf of SF_LINES) {
+        const count = perLevel + (remainder > 0 ? 1 : 0);
+        if (remainder > 0) remainder--;
+        for (let i = 0; i < count; i++) {
+          schedule.push(sf);
         }
       }
-
-      // Sort each bucket so that near-boundary candidates are preferred when balancing.
-      Object.values(buckets).forEach(bucket => {
-        bucket.A.sort((a, b) => a.score - b.score);
-        bucket.B.sort((a, b) => a.score - b.score);
-      });
-      return buckets;
+      shuffleInPlace(schedule, hashString(`${seed}_sfSchedule`));
+      return schedule;
     }
 
-    function assembleTrialsFromBuckets(bucketData, targetCounts, seed) {
-      const rng = hashString(`${seed}_assemble`);
-      const bucketKeys = Object.keys(bucketData);
-      const order = [...bucketKeys];
-      shuffleInPlace(order, rng);
+    function buildSymmetricOrientationList(minMag, maxMag, includeZero, total, seed) {
+      const cycle = [];
+      if (includeZero && minMag === 0) {
+        cycle.push(0);
+      }
+      const startMag = Math.max(1, minMag);
+      if (startMag > maxMag && !(includeZero && minMag === 0)) {
+        return [];
+      }
+      for (let mag = startMag; mag <= maxMag; mag++) {
+        cycle.push(-mag, mag);
+      }
+      if (cycle.length === 0) {
+        return [];
+      }
       const result = [];
-      const remaining = { A: targetCounts.A, B: targetCounts.B };
-      const bucketUsage = {};
-      let safeguard = 0;
-      while ((remaining.A > 0 || remaining.B > 0) && safeguard < 10000) {
-        safeguard++;
-        let picked = false;
-        for (const key of order) {
-          if (remaining.A <= 0 && remaining.B <= 0) break;
-          const bucket = bucketData[key];
-          if (!bucket) continue;
-          if (!bucketUsage[key]) {
-            bucketUsage[key] = { A: 0, B: 0 };
-          }
-          const diff = bucketUsage[key].A - bucketUsage[key].B;
-          let preferred = null;
-          if (diff > 0) {
-            preferred = 'B';
-          } else if (diff < 0) {
-            preferred = 'A';
-          } else {
-            preferred = remaining.A > remaining.B ? 'A' : 'B';
-            if (remaining.A === remaining.B) {
-              preferred = rng() < 0.5 ? 'A' : 'B';
-            }
-          }
-          const attemptOrder = preferred === 'A' ? ['A', 'B'] : ['B', 'A'];
-          let selected = null;
-          for (const cls of attemptOrder) {
-            if (remaining[cls] <= 0) continue;
-            if (bucket[cls] && bucket[cls].length > 0) {
-              selected = bucket[cls].shift();
-              bucketUsage[key][cls] += 1;
-              remaining[cls] -= 1;
-              picked = true;
-              break;
-            }
-          }
-          if (selected) {
-            result.push(selected);
-            if (result.length >= targetCounts.A + targetCounts.B) {
-              break;
-            }
-          }
-        }
-        if (!picked) {
-          // Fallback: pull from any remaining pool regardless of bucket balance.
-          const classes = ['A', 'B'];
-          for (const cls of classes) {
-            if (remaining[cls] <= 0) continue;
-            for (const key of order) {
-              const bucket = bucketData[key];
-              if (bucket && bucket[cls] && bucket[cls].length > 0) {
-                const selected = bucket[cls].shift();
-                if (!bucketUsage[key]) bucketUsage[key] = { A: 0, B: 0 };
-                bucketUsage[key][cls] += 1;
-                remaining[cls] -= 1;
-                result.push(selected);
-                picked = true;
-                break;
-              }
-            }
-            if (picked) break;
-          }
-        }
-        if (result.length >= targetCounts.A + targetCounts.B) break;
-        if (!picked) break;
+      const baseCycles = Math.floor(total / cycle.length);
+      for (let i = 0; i < baseCycles; i++) {
+        const copy = [...cycle];
+        shuffleInPlace(copy, hashString(`${seed}_cycle_${i}`));
+        result.push(...copy);
       }
+      let remaining = total - baseCycles * cycle.length;
+      if (includeZero && minMag === 0 && remaining > 0) {
+        result.push(0);
+        remaining -= 1;
+      }
+      if (includeZero && minMag === 0 && remaining % 2 === 1) {
+        result.push(0);
+        remaining -= 1;
+      }
+      let mag = startMag;
+      while (remaining > 0) {
+        if (mag > maxMag) {
+          mag = startMag;
+        }
+        if (remaining >= 2) {
+          result.push(-mag, mag);
+          remaining -= 2;
+          mag += 1;
+        } else {
+          break;
+        }
+      }
+      return result.slice(0, total);
+    }
 
-      // Final shuffle for presentation order.
-      shuffleInPlace(result, rng);
-      return result;
+    function jitterOrientationForRB(baseOri, intendedLabel, cfg, rng) {
+      const threshold = cfg.RB_ABS_ORI_THRESHOLD;
+      let attempt = 0;
+      while (attempt < 8) {
+        const jitter = (rng() * 2 - 1) * ORI_JITTER;
+        const candidate = clamp(baseOri + jitter, ORI_MIN, ORI_MAX);
+        if (labelRB(candidate, cfg) === intendedLabel) {
+          return candidate;
+        }
+        attempt++;
+      }
+      const sign = baseOri === 0 ? 1 : Math.sign(baseOri || 1);
+      if (intendedLabel === 'A') {
+        const safeMag = Math.min(threshold - 0.05, Math.abs(baseOri));
+        return clamp(sign * Math.max(0, safeMag), ORI_MIN, ORI_MAX);
+      }
+      const safeMag = Math.max(threshold + 0.05, Math.abs(baseOri));
+      return clamp(sign * safeMag, ORI_MIN, ORI_MAX);
     }
 
     function makeTrialsRB(cfg) {
-      const trials = buildCandidatesRB(cfg, participantId).slice(0, N_RB).map((item, idx) => ({
-        blockName: 'RB',
-        trialIndex: idx + 1,
-        sf: item.sf,
-        ori: item.ori,
-        label: item.label,
-        correctKey: item.correctKey
-      }));
-      return trials;
+      const targetPerClass = N_RB / 2;
+      const threshold = cfg.RB_ABS_ORI_THRESHOLD;
+      const aOrientations = buildSymmetricOrientationList(0, threshold, true, targetPerClass, `${participantId}_RB_A`);
+      const bOrientations = buildSymmetricOrientationList(threshold + 1, ORI_MAX, false, targetPerClass, `${participantId}_RB_B`);
+      const entries = [
+        ...aOrientations.map(ori => ({ baseOri: ori, intendedLabel: 'A' })),
+        ...bOrientations.map(ori => ({ baseOri: ori, intendedLabel: 'B' }))
+      ];
+      const orderRng = hashString(`${participantId}_RB_order`);
+      shuffleInPlace(entries, orderRng);
+      const sfSchedule = buildSfSchedule(entries.length, `${participantId}_RB`);
+      const jitterRng = hashString(`${participantId}_RB_jitter`);
+      return entries.map((entry, idx) => {
+        const ori = jitterOrientationForRB(entry.baseOri, entry.intendedLabel, cfg, jitterRng);
+        const label = labelRB(ori, cfg);
+        return {
+          blockName: 'RB',
+          trialIndex: idx + 1,
+          sf: sfSchedule[idx],
+          ori,
+          label,
+          correctKey: label === 'A' ? 'a' : 'b'
+        };
+      });
+    }
+
+    const II_BIN_SPECS = [
+      { name: 'NEG_15_10', orientations: [-15, -14, -13, -12, -11], counts: [7, 7, 6, 7, 6], sfCounts: { 3: 25, 4: 8 } },
+      { name: 'NEG_10_5', orientations: [-10, -9, -8, -7, -6], counts: [7, 6, 7, 7, 7], sfCounts: { 4: 17, 5: 17 } },
+      { name: 'NEG_5_0', orientations: [-5, -4, -3, -2, -1], counts: [7, 7, 6, 7, 6], sfCounts: { 5: 8, 6: 25 } },
+      { name: 'POS_0_5', orientations: [1, 2, 3, 4, 5], counts: [7, 7, 7, 6, 6], sfCounts: { 5: 8, 6: 25 } },
+      { name: 'POS_5_10', orientations: [6, 7, 8, 9, 10], counts: [7, 7, 7, 6, 7], sfCounts: { 4: 17, 5: 17 } },
+      { name: 'POS_10_15', orientations: [11, 12, 13, 14, 15], counts: [7, 6, 7, 6, 7], sfCounts: { 3: 25, 4: 8 } }
+    ];
+
+    function buildIIRawSchedule() {
+      const combos = [];
+      II_BIN_SPECS.forEach((spec, specIndex) => {
+        const oriPool = [];
+        spec.orientations.forEach((oriInt, idx) => {
+          const repeat = spec.counts[idx];
+          for (let i = 0; i < repeat; i++) {
+            oriPool.push(oriInt);
+          }
+        });
+        const sfPool = [];
+        Object.entries(spec.sfCounts).forEach(([sf, count]) => {
+          for (let i = 0; i < count; i++) {
+            sfPool.push(Number(sf));
+          }
+        });
+        shuffleInPlace(oriPool, hashString(`${participantId}_II_ori_${spec.name}_${specIndex}`));
+        shuffleInPlace(sfPool, hashString(`${participantId}_II_sf_${spec.name}_${specIndex}`));
+        for (let i = 0; i < oriPool.length; i++) {
+          combos.push({
+            baseOri: oriPool[i],
+            sf: sfPool[i],
+            bin: spec.name
+          });
+        }
+      });
+      return combos;
+    }
+
+    function calibrateIIBias(trials, cfg) {
+      const scores = trials.map(t => t.baseScore);
+      const sorted = [...scores].sort((a, b) => a - b);
+      const target = N_II / 2;
+      let bias = cfg.II_BIAS;
+      if (sorted.length >= target + 1) {
+        const lower = sorted[target - 1];
+        const upper = sorted[target];
+        bias = upper === lower ? upper + 1e-9 : (lower + upper) / 2;
+      }
+      cfg.II_DYNAMIC_BIAS = bias;
+      return bias;
     }
 
     function makeTrialsII(cfg) {
-      const trials = buildCandidatesII(cfg, participantId).slice(0, N_II).map((item, idx) => ({
-        blockName: 'II',
-        trialIndex: idx + 1,
-        sf: item.sf,
-        ori: item.ori,
-        label: item.label,
-        correctKey: item.correctKey
-      }));
-      return trials;
-    }
+      const rawCombos = buildIIRawSchedule();
+      const jitterRng = hashString(`${participantId}_II_jitter`);
+      const scored = rawCombos.map(combo => {
+        const jitter = (jitterRng() * 2 - 1) * ORI_JITTER;
+        const ori = clamp(combo.baseOri + jitter, ORI_MIN, ORI_MAX);
+        const { score } = computeIIScoreComponents(combo.sf, ori, cfg);
+        return { ...combo, ori, baseScore: score };
+      });
+      let bias = calibrateIIBias(scored, cfg);
+      const trials = scored.map(item => {
+        const label = item.baseScore > bias ? 'A' : 'B';
+        return {
+          blockName: 'II',
+          sf: item.sf,
+          ori: item.ori,
+          label,
+          correctKey: label === 'A' ? 'a' : 'b'
+        };
+      });
 
+      const target = N_II / 2;
+      let countA = trials.filter(t => t.label === 'A').length;
+      if (countA !== target) {
+        const ordered = scored.map((item, idx) => ({ idx, value: item.baseScore }))
+          .sort((a, b) => b.value - a.value);
+        const selected = new Set(ordered.slice(0, target).map(item => item.idx));
+        const lower = ordered[target - 1].value;
+        const upper = ordered[target] ? ordered[target].value : lower;
+        bias = upper === lower ? upper + 1e-9 : (lower + upper) / 2;
+        cfg.II_DYNAMIC_BIAS = bias;
+        for (let i = 0; i < trials.length; i++) {
+          const label = selected.has(i) ? 'A' : 'B';
+          trials[i].label = label;
+          trials[i].correctKey = label === 'A' ? 'a' : 'b';
+        }
+      }
+
+      const orderRng = hashString(`${participantId}_II_order`);
+      shuffleInPlace(trials, orderRng);
+      return trials.map((trial, idx) => ({
+        ...trial,
+        trialIndex: idx + 1
+      }));
+    }
     // -------------------------
     // Stimulus rendering
     // -------------------------
