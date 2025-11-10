@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh">
 <head>
   <meta charset="UTF-8" />
-  <title>Gabor Classification Experiment</title>
+  <title>Gabor 分类实验</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -84,15 +84,38 @@
       border-radius: 12px;
       pointer-events: none;
     }
+    #responseButtons {
+      position: fixed;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 16px;
+      z-index: 10;
+    }
+    #responseButtons button {
+      padding: 14px 24px;
+      font-size: 18px;
+      border-radius: 999px;
+      border: none;
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      min-width: 140px;
+      cursor: pointer;
+      transition: background 0.2s ease;
+    }
+    #responseButtons button:active {
+      background: rgba(0,0,0,0.8);
+    }
   </style>
 </head>
 <body>
   <div id="startScreen">
-    <label for="participantInput">Participant ID</label>
+    <label for="participantInput">被试编号</label>
     <input id="participantInput" type="text" autocomplete="off" />
-    <button id="startButton">Start</button>
+    <button id="startButton">开始</button>
     <p style="max-width: 420px; text-align: center; line-height: 1.4; font-size: 14px; color: #222;">
-      Press Start to enter the Gabor classification experiment. Responses use keys A and B. Press Escape at any time to terminate and download collected data.
+      点击“开始”进入 Gabor 分类实验。作答可按键 A/B，或点击屏幕下方的 A 类、B 类按钮。随时按下 Escape 可终止并立刻下载已收集数据。
     </p>
   </div>
   <div id="experimentContainer">
@@ -100,6 +123,10 @@
       <canvas id="gaborCanvas"></canvas>
       <div id="feedbackOverlay"></div>
       <div id="statusText"></div>
+    </div>
+    <div id="responseButtons">
+      <button class="responseButton" data-key="a">选择 A 类（键盘 A）</button>
+      <button class="responseButton" data-key="b">选择 B 类（键盘 B）</button>
     </div>
   </div>
   <script>
@@ -143,6 +170,7 @@
     const ctx = canvas.getContext('2d');
     const feedbackOverlay = document.getElementById('feedbackOverlay');
     const statusText = document.getElementById('statusText');
+    const responseButtons = document.querySelectorAll('.responseButton');
 
     // -------------------------
     // State variables
@@ -155,18 +183,20 @@
     let responseState = null;
     let currentBlockName = '';
     let pendingDownload = false;
+    let displayWidth = window.innerWidth;
+    let displayHeight = window.innerHeight;
 
     // -------------------------
     // Utility helpers
     // -------------------------
     function resizeCanvas() {
       const ratio = window.devicePixelRatio || 1;
-      const width = window.innerWidth;
-      const height = window.innerHeight;
-      canvas.width = Math.round(width * ratio);
-      canvas.height = Math.round(height * ratio);
-      canvas.style.width = width + 'px';
-      canvas.style.height = height + 'px';
+      displayWidth = window.innerWidth;
+      displayHeight = window.innerHeight;
+      canvas.width = Math.round(displayWidth * ratio);
+      canvas.height = Math.round(displayHeight * ratio);
+      canvas.style.width = displayWidth + 'px';
+      canvas.style.height = displayHeight + 'px';
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     }
 
@@ -472,16 +502,17 @@
     // -------------------------
     function drawBackground() {
       ctx.fillStyle = '#888';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, displayWidth, displayHeight);
     }
 
     function drawFixation() {
       drawBackground();
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
+      const centerX = displayWidth / 2;
+      const centerY = displayHeight / 2;
       ctx.strokeStyle = '#111';
-      ctx.lineWidth = 4;
-      const size = Math.min(canvas.width, canvas.height) * 0.02;
+      const ratio = window.devicePixelRatio || 1;
+      ctx.lineWidth = 4 / ratio;
+      const size = Math.min(displayWidth, displayHeight) * 0.02;
       ctx.beginPath();
       ctx.moveTo(centerX - size, centerY);
       ctx.lineTo(centerX + size, centerY);
@@ -538,7 +569,8 @@
       offCtx.putImageData(imageData, 0, 0);
       ctx.drawImage(offCanvas, cx - radius, cy - radius);
       ctx.strokeStyle = '#000';
-      ctx.lineWidth = Math.max(2, size * 0.03);
+      const ratio = window.devicePixelRatio || 1;
+      ctx.lineWidth = Math.max(2, size * 0.03) / ratio;
       ctx.beginPath();
       ctx.arc(cx, cy, radius - ctx.lineWidth / 2, 0, Math.PI * 2);
       ctx.stroke();
@@ -546,9 +578,9 @@
 
     function renderStimulus(sf, ori) {
       drawBackground();
-      const diameter = Math.min(canvas.width, canvas.height) * 0.36;
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
+      const diameter = Math.min(displayWidth, displayHeight) * 0.36;
+      const centerX = displayWidth / 2;
+      const centerY = displayHeight / 2;
       drawGabor(ctx, centerX, centerY, diameter, ori, sf);
     }
 
@@ -593,6 +625,18 @@
       }
     }
 
+    function deliverResponse(key) {
+      if (!experimentRunning) return;
+      if (!responseState) return;
+      if (key !== 'a' && key !== 'b') return;
+      clearTimeout(responseState.timer);
+      const now = performance.now();
+      const rtMs = now - responseState.startTime;
+      const resolver = responseState.resolve;
+      responseState = null;
+      resolver({ resp: key, rtMs, timeout: false, aborted: false });
+    }
+
     function handleKeyDown(event) {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -605,23 +649,33 @@
       if (!experimentRunning) return;
       if (!responseState) return;
       const key = event.key.toLowerCase();
-      if (key !== 'a' && key !== 'b') return;
-      clearTimeout(responseState.timer);
-      const now = performance.now();
-      const rtMs = now - responseState.startTime;
-      const resolver = responseState.resolve;
-      responseState = null;
-      resolver({ resp: key, rtMs, timeout: false, aborted: false });
+      deliverResponse(key);
     }
 
     document.addEventListener('keydown', handleKeyDown);
+
+    responseButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const key = btn.getAttribute('data-key');
+        deliverResponse(key);
+      });
+      btn.addEventListener('touchstart', (event) => {
+        event.preventDefault();
+        const key = btn.getAttribute('data-key');
+        deliverResponse(key);
+      }, { passive: false });
+    });
 
     // -------------------------
     // Trial execution
     // -------------------------
     async function runBlock(blockName, trials) {
       currentBlockName = blockName;
-      updateStatus(`${blockName} block: 0 / ${trials.length}`);
+      if (blockName === 'RB') {
+        updateStatus('当前阶段：RB（规则型，仅使用方向角度）。请选择 A 类或 B 类。');
+      } else {
+        updateStatus('当前阶段：II（信息整合，方向 + 条纹数）。请选择 A 类或 B 类。');
+      }
       for (let i = 0; i < trials.length; i++) {
         if (aborted) break;
         const trial = trials[i];
@@ -657,7 +711,7 @@
           respKey = 'NA';
         }
         const corr = respKey === trial.correctKey ? 1 : 0;
-        showFeedback(corr ? 'Correct' : 'Wrong', corr ? '#2ecc71' : '#e74c3c');
+        showFeedback(corr ? '正确' : '错误', corr ? '#2ecc71' : '#e74c3c');
         await wait(FEEDBACK_MS);
         hideFeedback();
         if (aborted) break;
@@ -675,7 +729,6 @@
           timeoutFlag,
           trialStartUTC
         ]);
-        updateStatus(`${blockName} block: ${i + 1} / ${trials.length}`);
       }
     }
 
@@ -732,7 +785,7 @@
 
     function concludeExperiment() {
       experimentRunning = false;
-      updateStatus('Experiment complete.');
+      updateStatus('实验完成，CSV 已自动下载。');
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `gabor_${participantId || 'anon'}_${timestamp}.csv`;
       downloadCSV(filename, dataRows);
@@ -743,7 +796,7 @@
       if (!experimentRunning) return;
       clearResponseState();
       experimentRunning = false;
-      updateStatus('Experiment aborted.');
+      updateStatus('实验已中止，CSV 已自动下载。');
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const filename = `gabor_${participantId || 'anon'}_${timestamp}.csv`;
       downloadCSV(filename, dataRows);
@@ -757,7 +810,7 @@
       ctx.font = '28px Arial';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText('Thank you for participating!', canvas.width / 2, canvas.height / 2);
+      ctx.fillText('感谢参与实验！', displayWidth / 2, displayHeight / 2);
     }
 
     function resetState() {
@@ -768,14 +821,14 @@
     async function handleStart() {
       participantId = participantInput.value.trim();
       if (!participantId) {
-        alert('Please enter a participant identifier.');
+        alert('请输入被试编号。');
         return;
       }
       resetState();
       participantConfig = deriveParticipantConfig(participantId);
       startScreen.style.display = 'none';
       experimentContainer.style.display = 'flex';
-      updateStatus('Entering full screen...');
+      updateStatus('正在尝试进入全屏模式...');
       try {
         if (document.fullscreenEnabled) {
           await document.documentElement.requestFullscreen();
@@ -784,7 +837,7 @@
         console.warn('Fullscreen request failed:', err);
       }
       await wait(100);
-      updateStatus('Preparing trials...');
+      updateStatus('正在准备试次，请稍候...');
       startExperiment();
     }
 
@@ -793,7 +846,7 @@
     document.addEventListener('fullscreenchange', () => {
       if (!document.fullscreenElement && experimentRunning && !aborted) {
         // If participant exits fullscreen manually, continue but note in status.
-        updateStatus('Fullscreen exited; experiment continues.');
+        updateStatus('已退出全屏，实验仍将继续。');
       }
     });
 
