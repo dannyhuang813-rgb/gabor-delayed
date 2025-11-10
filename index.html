@@ -540,8 +540,6 @@
       const freq = cycles / size; // ensures diameter direction shows the target stripe count.
       const cosOri = Math.cos(orientation);
       const sinOri = Math.sin(orientation);
-      const sigma = size / 6;
-      const twoSigmaSq = 2 * sigma * sigma;
       for (let y = 0; y < size; y++) {
         for (let x = 0; x < size; x++) {
           const dx = x - radius + 0.5;
@@ -556,10 +554,9 @@
             continue;
           }
           const rotX = dx * cosOri + dy * sinOri;
-          const gaussian = Math.exp(-distSq / twoSigmaSq);
           const sine = Math.cos(2 * Math.PI * freq * rotX);
-          const luminance = 127 + 127 * gaussian * sine;
-          const value = Math.max(0, Math.min(255, Math.round(luminance)));
+          // Hard-edged black/white stripes without Gaussian falloff.
+          const value = sine >= 0 ? 235 : 20;
           data[idx] = value;
           data[idx + 1] = value;
           data[idx + 2] = value;
@@ -671,11 +668,7 @@
     // -------------------------
     async function runBlock(blockName, trials) {
       currentBlockName = blockName;
-      if (blockName === 'RB') {
-        updateStatus('当前阶段：RB（规则型，仅使用方向角度）。请选择 A 类或 B 类。');
-      } else {
-        updateStatus('当前阶段：II（信息整合，方向 + 条纹数）。请选择 A 类或 B 类。');
-      }
+      updateStatus('请尽快判断后选择 A 类或 B 类。');
       for (let i = 0; i < trials.length; i++) {
         if (aborted) break;
         const trial = trials[i];
@@ -698,6 +691,7 @@
         renderStimulus(trial.sf, trial.ori);
         const response = await waitForResponse();
         clearResponseState();
+        drawBlank();
         if (response.aborted || aborted) {
           break;
         }
