@@ -240,6 +240,8 @@
     function deriveParticipantConfig(participant) {
       const trimmed = (participant || '').trim();
       let rbThreshold = DEFAULT_RB_THRESHOLD;
+      let rbMode = 'ori';
+      let rbStrictLt = false;
       let wSf = DEFAULT_W_SF;
       let wOri = DEFAULT_W_ORI;
       let delayMs = 0;
@@ -251,13 +253,15 @@
       if (matchLetter) {
         const letter = matchLetter[0].toUpperCase();
         if (letter === 'A') {
-          rbThreshold = 5;
+          rbThreshold = 7;
+          rbStrictLt = true;
           wSf = WEIGHT_SET_A.W_SF;
           wOri = WEIGHT_SET_A.W_ORI;
           iiBias = II_BIAS_A;
           assignmentPlan = II_ASSIGNMENT_PLAN_A;
         } else if (letter === 'B') {
-          rbThreshold = 10;
+          rbMode = 'sf';
+          rbThreshold = DEFAULT_RB_THRESHOLD;
           wSf = WEIGHT_SET_B.W_SF;
           wOri = WEIGHT_SET_B.W_ORI;
           iiBias = II_BIAS_B;
@@ -275,6 +279,8 @@
 
       return {
         RB_ABS_ORI_THRESHOLD: rbThreshold,
+        RB_MODE: rbMode,
+        RB_STRICT_LT: rbStrictLt,
         W_SF: wSf,
         W_ORI: wOri,
         II_BIAS: iiBias,
@@ -286,8 +292,15 @@
     // -------------------------
     // Labeling functions
     // -------------------------
-    function labelRB(oriDeg, cfg) {
-      return Math.abs(oriDeg) <= cfg.RB_ABS_ORI_THRESHOLD ? 'A' : 'B';
+    function labelRB(oriDeg, sfLines, cfg) {
+      if (cfg.RB_MODE === 'sf') {
+        return sfLines >= 5 ? 'A' : 'B';
+      }
+      const threshold = cfg.RB_ABS_ORI_THRESHOLD;
+      if (cfg.RB_STRICT_LT) {
+        return Math.abs(oriDeg) < threshold ? 'A' : 'B';
+      }
+      return Math.abs(oriDeg) <= threshold ? 'A' : 'B';
     }
 
     function computeIIScore(sfLines, oriDeg, cfg) {
@@ -317,6 +330,21 @@
         }
       }
       shuffleInPlace(schedule, hashString(`${seed}_sfSchedule`));
+      return schedule;
+    }
+
+    function buildSfScheduleForSet(total, allowedSfs, seed) {
+      const perLevel = Math.floor(total / allowedSfs.length);
+      let remainder = total - perLevel * allowedSfs.length;
+      const schedule = [];
+      for (const sf of allowedSfs) {
+        const count = perLevel + (remainder > 0 ? 1 : 0);
+        if (remainder > 0) remainder--;
+        for (let i = 0; i < count; i++) {
+          schedule.push(sf);
+        }
+      }
+      shuffleInPlace(schedule, hashString(`${seed}_subsetSf`));
       return schedule;
     }
 
@@ -367,46 +395,86 @@
       return result.slice(0, total);
     }
 
-    function jitterOrientationForRB(baseOri, intendedLabel, cfg, rng) {
+    function jitterOrientationForRB(baseOri, sf, intendedLabel, cfg, rng) {
+      if (cfg.RB_MODE === 'sf') {
+        const jitter = (rng() * 2 - 1) * ORI_JITTER;
+        return clamp(baseOri + jitter, ORI_MIN, ORI_MAX);
+      }
       const threshold = cfg.RB_ABS_ORI_THRESHOLD;
       let attempt = 0;
       while (attempt < 8) {
         const jitter = (rng() * 2 - 1) * ORI_JITTER;
         const candidate = clamp(baseOri + jitter, ORI_MIN, ORI_MAX);
-        if (labelRB(candidate, cfg) === intendedLabel) {
+        if (labelRB(candidate, sf, cfg) === intendedLabel) {
           return candidate;
         }
         attempt++;
       }
       const sign = baseOri === 0 ? 1 : Math.sign(baseOri || 1);
       if (intendedLabel === 'A') {
-        const safeMag = Math.min(threshold - 0.05, Math.abs(baseOri));
-        return clamp(sign * Math.max(0, safeMag), ORI_MIN, ORI_MAX);
+        const boundary = cfg.RB_STRICT_LT ? threshold : threshold + 0.0001;
+        const safeLimit = Math.max(0, boundary - 0.05);
+        const safeMag = Math.min(safeLimit, Math.abs(baseOri));
+        return clamp(sign * safeMag, ORI_MIN, ORI_MAX);
       }
-      const safeMag = Math.max(threshold + 0.05, Math.abs(baseOri));
+      const lower = cfg.RB_STRICT_LT ? threshold : threshold + 0.0001;
+      const safeMag = Math.max(lower + 0.05, Math.abs(baseOri));
       return clamp(sign * safeMag, ORI_MIN, ORI_MAX);
     }
 
     function makeTrialsRB(cfg) {
       const targetPerClass = N_RB / 2;
+      const orderRng = hashString(`${participantId}_RB_order`);
+      const jitterRng = hashString(`${participantId}_RB_jitter`);
+
+      if (cfg.RB_MODE === 'sf') {
+        const orientA = buildSymmetricOrientationList(0, ORI_MAX, true, targetPerClass, `${participantId}_RB_A_sfOri`);
+        const orientB = buildSymmetricOrientationList(0, ORI_MAX, true, targetPerClass, `${participantId}_RB_B_sfOri`);
+        const sfA = buildSfScheduleForSet(targetPerClass, [5, 6], `${participantId}_RB_A_sf`);
+        const sfB = buildSfScheduleForSet(targetPerClass, [3, 4], `${participantId}_RB_B_sf`);
+        const entries = [
+          ...orientA.map((ori, idx) => ({ baseOri: ori, intendedLabel: 'A', sf: sfA[idx] })),
+          ...orientB.map((ori, idx) => ({ baseOri: ori, intendedLabel: 'B', sf: sfB[idx] }))
+        ];
+        shuffleInPlace(entries, orderRng);
+        return entries.map((entry, idx) => {
+          const ori = jitterOrientationForRB(entry.baseOri, entry.sf, entry.intendedLabel, cfg, jitterRng);
+          const label = labelRB(ori, entry.sf, cfg);
+          return {
+            blockName: 'RB',
+            trialIndex: idx + 1,
+            sf: entry.sf,
+            ori,
+            label,
+            correctKey: label === 'A' ? 'a' : 'b'
+          };
+        });
+      }
+
       const threshold = cfg.RB_ABS_ORI_THRESHOLD;
-      const aOrientations = buildSymmetricOrientationList(0, threshold, true, targetPerClass, `${participantId}_RB_A`);
-      const bOrientations = buildSymmetricOrientationList(threshold + 1, ORI_MAX, false, targetPerClass, `${participantId}_RB_B`);
+      const strict = cfg.RB_STRICT_LT;
+      const aMaxMag = Math.min(ORI_MAX, strict ? Math.ceil(threshold) - 1 : Math.floor(threshold));
+      const bMinMag = Math.max(0, strict ? Math.ceil(threshold) : Math.floor(threshold) + 1);
+      const aOrientations = aMaxMag >= 0
+        ? buildSymmetricOrientationList(0, aMaxMag, true, targetPerClass, `${participantId}_RB_A`)
+        : [];
+      const bOrientations = bMinMag <= ORI_MAX
+        ? buildSymmetricOrientationList(Math.max(1, bMinMag), ORI_MAX, false, targetPerClass, `${participantId}_RB_B`)
+        : [];
       const entries = [
         ...aOrientations.map(ori => ({ baseOri: ori, intendedLabel: 'A' })),
         ...bOrientations.map(ori => ({ baseOri: ori, intendedLabel: 'B' }))
       ];
-      const orderRng = hashString(`${participantId}_RB_order`);
       shuffleInPlace(entries, orderRng);
       const sfSchedule = buildSfSchedule(entries.length, `${participantId}_RB`);
-      const jitterRng = hashString(`${participantId}_RB_jitter`);
       return entries.map((entry, idx) => {
-        const ori = jitterOrientationForRB(entry.baseOri, entry.intendedLabel, cfg, jitterRng);
-        const label = labelRB(ori, cfg);
+        const sf = sfSchedule[idx];
+        const ori = jitterOrientationForRB(entry.baseOri, sf, entry.intendedLabel, cfg, jitterRng);
+        const label = labelRB(ori, sf, cfg);
         return {
           blockName: 'RB',
           trialIndex: idx + 1,
-          sf: sfSchedule[idx],
+          sf,
           ori,
           label,
           correctKey: label === 'A' ? 'a' : 'b'
