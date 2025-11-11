@@ -138,7 +138,29 @@
     const WEIGHT_SET_B = { W_SF: 0.35, W_ORI: 0.65 }; // 方向优先
     const DEFAULT_W_SF = 0.5;
     const DEFAULT_W_ORI = 0.5;
-    const BASE_II_BIAS = 0; // score=0 切分线
+    const II_BIAS_A = 0.0535; // A 组固定常数项，匹配 0.65/0.35 权重
+    const II_BIAS_B = 0.18;   // B 组固定常数项，匹配 0.35/0.65 权重
+
+    // 预先求好的类型→条纹分配表，确保 sf×ori 频次均衡且 A/B=1:1。
+    const II_ASSIGNMENT_PLAN_A = {
+      '3-B|4-B': { 3: 40, 4: 0 },
+      '4-B|5-B': { 4: 11, 5: 16 },
+      '4-B|5-A': { 4: 23, 5: 18 },
+      '5-A|6-A': { 5: 16, 6: 50 },
+      '3-B|4-A': { 3: 10, 4: 16 }
+    };
+
+    const II_ASSIGNMENT_PLAN_B = {
+      '3-B|4-B': { 3: 20, 4: 13 },
+      '4-B|5-B': { 4: 12, 5: 22 },
+      '5-B|6-B': { 5: 0, 6: 14 },
+      '5-B|6-A': { 5: 6, 6: 20 },
+      '5-A|6-A': { 5: 10, 6: 16 },
+      '4-B|5-A': { 4: 0, 5: 7 },
+      '4-A|5-A': { 4: 22, 5: 5 },
+      '3-B|4-A': { 3: 13, 4: 0 },
+      '3-A|4-A': { 3: 17, 4: 3 }
+    };
     const DELAYED_STAGE_MS = 2500;
 
     const CSV_HEADER = ['participant','blockName','trialIndex','sf','ori','label','correctKey','resp','corr','rt','timeout','trialStartUTC'];
@@ -220,8 +242,9 @@
       let rbThreshold = DEFAULT_RB_THRESHOLD;
       let wSf = DEFAULT_W_SF;
       let wOri = DEFAULT_W_ORI;
-      let iiBias = BASE_II_BIAS;
       let delayMs = 0;
+      let iiBias = 0;
+      let assignmentPlan = null;
 
       const matchLetter = trimmed.match(/[a-zA-Z]/);
       const matchDigit = trimmed.match(/\d/);
@@ -231,10 +254,14 @@
           rbThreshold = 5;
           wSf = WEIGHT_SET_A.W_SF;
           wOri = WEIGHT_SET_A.W_ORI;
+          iiBias = II_BIAS_A;
+          assignmentPlan = II_ASSIGNMENT_PLAN_A;
         } else if (letter === 'B') {
           rbThreshold = 10;
           wSf = WEIGHT_SET_B.W_SF;
           wOri = WEIGHT_SET_B.W_ORI;
+          iiBias = II_BIAS_B;
+          assignmentPlan = II_ASSIGNMENT_PLAN_B;
         }
       }
       if (matchDigit) {
@@ -251,7 +278,7 @@
         W_SF: wSf,
         W_ORI: wOri,
         II_BIAS: iiBias,
-        II_DYNAMIC_BIAS: iiBias,
+        assignmentPlan,
         delayMs
       };
     }
@@ -263,10 +290,16 @@
       return Math.abs(oriDeg) <= cfg.RB_ABS_ORI_THRESHOLD ? 'A' : 'B';
     }
 
-    function computeIIScoreComponents(sfLines, oriDeg, cfg) {
+    function computeIIScore(sfLines, oriDeg, cfg) {
       const x = (sfLines - 4.5) / 1.5;
       const y = oriDeg / 15;
-      return { x, y, score: cfg.W_SF * x + cfg.W_ORI * y };
+      const raw = cfg.W_SF * x + cfg.W_ORI * y;
+      const bias = cfg.II_BIAS || 0;
+      return { x, y, raw, adjusted: raw - bias };
+    }
+
+    function labelII(sfLines, oriDeg, cfg) {
+      return computeIIScore(sfLines, oriDeg, cfg).adjusted > 0 ? 'A' : 'B';
     }
 
     // -------------------------
@@ -382,15 +415,104 @@
     }
 
     const II_BIN_SPECS = [
-      { name: 'NEG_15_10', orientations: [-15, -14, -13, -12, -11], counts: [7, 7, 6, 7, 6], sfCounts: { 3: 25, 4: 8 } },
-      { name: 'NEG_10_5', orientations: [-10, -9, -8, -7, -6], counts: [7, 6, 7, 7, 7], sfCounts: { 4: 17, 5: 17 } },
-      { name: 'NEG_5_0', orientations: [-5, -4, -3, -2, -1], counts: [7, 7, 6, 7, 6], sfCounts: { 5: 8, 6: 25 } },
-      { name: 'POS_0_5', orientations: [1, 2, 3, 4, 5], counts: [7, 7, 7, 6, 6], sfCounts: { 5: 8, 6: 25 } },
-      { name: 'POS_5_10', orientations: [6, 7, 8, 9, 10], counts: [7, 7, 7, 6, 7], sfCounts: { 4: 17, 5: 17 } },
-      { name: 'POS_10_15', orientations: [11, 12, 13, 14, 15], counts: [7, 6, 7, 6, 7], sfCounts: { 3: 25, 4: 8 } }
+      { name: 'NEG_15_10', orientations: [-15, -14, -13, -12, -11], counts: [7, 7, 6, 7, 6], allowed: [3, 4], sfCounts: { 3: 25, 4: 8 } },
+      { name: 'NEG_10_5', orientations: [-10, -9, -8, -7, -6], counts: [7, 6, 7, 7, 7], allowed: [4, 5], sfCounts: { 4: 17, 5: 17 } },
+      { name: 'NEG_5_0', orientations: [-5, -4, -3, -2, -1], counts: [7, 7, 6, 7, 6], allowed: [5, 6], sfCounts: { 5: 8, 6: 25 } },
+      { name: 'POS_0_5', orientations: [1, 2, 3, 4, 5], counts: [7, 7, 7, 6, 6], allowed: [5, 6], sfCounts: { 5: 8, 6: 25 } },
+      { name: 'POS_5_10', orientations: [6, 7, 8, 9, 10], counts: [7, 7, 7, 6, 7], allowed: [4, 5], sfCounts: { 4: 17, 5: 17 } },
+      { name: 'POS_10_15', orientations: [11, 12, 13, 14, 15], counts: [7, 6, 7, 6, 7], allowed: [3, 4], sfCounts: { 3: 25, 4: 8 } }
     ];
 
-    function buildIIRawSchedule() {
+    function buildIISlots(cfg) {
+      const slots = [];
+      II_BIN_SPECS.forEach((spec, specIndex) => {
+        spec.orientations.forEach((oriInt, idx) => {
+          const repeat = spec.counts[idx];
+          for (let i = 0; i < repeat; i++) {
+            const options = spec.allowed.map(sf => ({ sf, label: labelII(sf, oriInt, cfg) }));
+            const typeKey = options.map(opt => `${opt.sf}-${opt.label}`).join('|');
+            slots.push({
+              baseOri: oriInt,
+              typeKey,
+              options
+            });
+          }
+        });
+      });
+      return slots;
+    }
+
+    function assignSlotsWithPlan(slots, cfg) {
+      const grouped = new Map();
+      slots.forEach(slot => {
+        if (!grouped.has(slot.typeKey)) {
+          grouped.set(slot.typeKey, []);
+        }
+        grouped.get(slot.typeKey).push(slot);
+      });
+      const assigned = [];
+      grouped.forEach((list, key) => {
+        const plan = cfg.assignmentPlan[key];
+        if (!plan) {
+          throw new Error(`缺少 ${key} 的 II 分配计划`);
+        }
+        const totalPlanned = Object.values(plan).reduce((acc, val) => acc + val, 0);
+        if (totalPlanned !== list.length) {
+          throw new Error(`II 分配计划不匹配：${key}`);
+        }
+        shuffleInPlace(list, hashString(`${participantId}_II_type_${key}`));
+        let cursor = 0;
+        Object.entries(plan).forEach(([sfStr, count]) => {
+          const sfValue = Number(sfStr);
+          for (let i = 0; i < count; i++) {
+            const slot = list[cursor + i];
+            const option = slot.options.find(opt => opt.sf === sfValue);
+            assigned.push({
+              baseOri: slot.baseOri,
+              sf: sfValue,
+              label: option ? option.label : labelII(sfValue, slot.baseOri, cfg)
+            });
+          }
+          cursor += count;
+        });
+      });
+      return assigned;
+    }
+
+    function jitterOrientationForII(baseOri, sf, intendedLabel, cfg, rng) {
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const jitter = (rng() * 2 - 1) * ORI_JITTER;
+        const candidate = clamp(baseOri + jitter, ORI_MIN, ORI_MAX);
+        if (labelII(sf, candidate, cfg) === intendedLabel) {
+          return candidate;
+        }
+      }
+      if (labelII(sf, baseOri, cfg) === intendedLabel) {
+        return baseOri;
+      }
+      return clamp(baseOri, ORI_MIN, ORI_MAX);
+    }
+
+    function makeTrialsIIWithPlan(cfg) {
+      const slots = buildIISlots(cfg);
+      const assigned = assignSlotsWithPlan(slots, cfg);
+      const jitterRng = hashString(`${participantId}_II_jitter`);
+      const orderRng = hashString(`${participantId}_II_order`);
+      const trials = assigned.map(item => {
+        const ori = jitterOrientationForII(item.baseOri, item.sf, item.label, cfg, jitterRng);
+        return {
+          blockName: 'II',
+          sf: item.sf,
+          ori,
+          label: item.label,
+          correctKey: item.label === 'A' ? 'a' : 'b'
+        };
+      });
+      shuffleInPlace(trials, orderRng);
+      return trials.map((trial, idx) => ({ ...trial, trialIndex: idx + 1 }));
+    }
+
+    function makeTrialsIIAdaptive(cfg) {
       const combos = [];
       II_BIN_SPECS.forEach((spec, specIndex) => {
         const oriPool = [];
@@ -401,7 +523,7 @@
           }
         });
         const sfPool = [];
-        Object.entries(spec.sfCounts).forEach(([sf, count]) => {
+        Object.entries(spec.sfCounts || {}).forEach(([sf, count]) => {
           for (let i = 0; i < count; i++) {
             sfPool.push(Number(sf));
           }
@@ -409,42 +531,24 @@
         shuffleInPlace(oriPool, hashString(`${participantId}_II_ori_${spec.name}_${specIndex}`));
         shuffleInPlace(sfPool, hashString(`${participantId}_II_sf_${spec.name}_${specIndex}`));
         for (let i = 0; i < oriPool.length; i++) {
-          combos.push({
-            baseOri: oriPool[i],
-            sf: sfPool[i],
-            bin: spec.name
-          });
+          combos.push({ baseOri: oriPool[i], sf: sfPool[i] });
         }
       });
-      return combos;
-    }
-
-    function calibrateIIBias(trials, cfg) {
-      const scores = trials.map(t => t.baseScore);
-      const sorted = [...scores].sort((a, b) => a - b);
-      const target = N_II / 2;
-      let bias = cfg.II_BIAS;
-      if (sorted.length >= target + 1) {
-        const lower = sorted[target - 1];
-        const upper = sorted[target];
-        bias = upper === lower ? upper + 1e-9 : (lower + upper) / 2;
-      }
-      cfg.II_DYNAMIC_BIAS = bias;
-      return bias;
-    }
-
-    function makeTrialsII(cfg) {
-      const rawCombos = buildIIRawSchedule();
       const jitterRng = hashString(`${participantId}_II_jitter`);
-      const scored = rawCombos.map(combo => {
+      const scored = combos.map(item => {
         const jitter = (jitterRng() * 2 - 1) * ORI_JITTER;
-        const ori = clamp(combo.baseOri + jitter, ORI_MIN, ORI_MAX);
-        const { score } = computeIIScoreComponents(combo.sf, ori, cfg);
-        return { ...combo, ori, baseScore: score };
+        const ori = clamp(item.baseOri + jitter, ORI_MIN, ORI_MAX);
+        const { adjusted, raw } = computeIIScore(item.sf, ori, cfg);
+        return { ...item, ori, rawScore: raw, adjustedScore: adjusted };
       });
-      let bias = calibrateIIBias(scored, cfg);
+      const target = N_II / 2;
+      const sorted = scored.map(item => item.rawScore).sort((a, b) => a - b);
+      const boundary = (sorted[target - 1] + sorted[target]) / 2 || 0;
+      cfg.II_BIAS = boundary;
+      const orderRng = hashString(`${participantId}_II_order`);
       const trials = scored.map(item => {
-        const label = item.baseScore > bias ? 'A' : 'B';
+        const adjusted = item.rawScore - cfg.II_BIAS;
+        const label = adjusted > 0 ? 'A' : 'B';
         return {
           blockName: 'II',
           sf: item.sf,
@@ -453,30 +557,15 @@
           correctKey: label === 'A' ? 'a' : 'b'
         };
       });
-
-      const target = N_II / 2;
-      let countA = trials.filter(t => t.label === 'A').length;
-      if (countA !== target) {
-        const ordered = scored.map((item, idx) => ({ idx, value: item.baseScore }))
-          .sort((a, b) => b.value - a.value);
-        const selected = new Set(ordered.slice(0, target).map(item => item.idx));
-        const lower = ordered[target - 1].value;
-        const upper = ordered[target] ? ordered[target].value : lower;
-        bias = upper === lower ? upper + 1e-9 : (lower + upper) / 2;
-        cfg.II_DYNAMIC_BIAS = bias;
-        for (let i = 0; i < trials.length; i++) {
-          const label = selected.has(i) ? 'A' : 'B';
-          trials[i].label = label;
-          trials[i].correctKey = label === 'A' ? 'a' : 'b';
-        }
-      }
-
-      const orderRng = hashString(`${participantId}_II_order`);
       shuffleInPlace(trials, orderRng);
-      return trials.map((trial, idx) => ({
-        ...trial,
-        trialIndex: idx + 1
-      }));
+      return trials.map((trial, idx) => ({ ...trial, trialIndex: idx + 1 }));
+    }
+
+    function makeTrialsII(cfg) {
+      if (cfg.assignmentPlan) {
+        return makeTrialsIIWithPlan(cfg);
+      }
+      return makeTrialsIIAdaptive(cfg);
     }
     // -------------------------
     // Stimulus rendering
@@ -809,6 +898,11 @@
       }
       resetState();
       participantConfig = deriveParticipantConfig(participantId);
+      if (participantConfig.assignmentPlan) {
+        console.log(`II 判定公式：score = ${participantConfig.W_SF.toFixed(2)} * x + ${participantConfig.W_ORI.toFixed(2)} * y - ${participantConfig.II_BIAS.toFixed(4)} (x=(sf-4.5)/1.5, y=ori/15)`);
+      } else {
+        console.log(`II 判定公式：score = ${participantConfig.W_SF.toFixed(2)} * x + ${participantConfig.W_ORI.toFixed(2)} * y - bias (动态自适应)`);
+      }
       startScreen.style.display = 'none';
       experimentContainer.style.display = 'flex';
       updateStatus('正在尝试进入全屏模式...');
