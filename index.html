@@ -124,16 +124,19 @@
     const N_II = 240;
 
     const USE_FIXATION = true,  FIX_MS = 500;
-    const USE_PREBLANK = true, PREBLANK_MS = 200;
-    const RESP_LIMIT_MS = 3500;
-    const FEEDBACK_MS   = 700;
+    const USE_PREBLANK = false, PREBLANK_MS = 0;
+    const RESP_LIMIT_MS = 3000;
+    const FEEDBACK_MS   = 500;
 
     const ORI_MIN = -15, ORI_MAX = 15;
     const SF_LINES = [3, 4, 5, 6]; // We store the visible黑白成对条纹数量（cycle count）到 CSV。
 
     const ORI_JITTER = 0.5;
 
-    const DELAYED_STAGE_MS = 2500;
+    const DELAYED_STAGE_MS = 2000;
+
+    const II_NEAR_TARGET = 0.45;
+    const II_NEAR_TOLERANCE = 0.05; // acceptable range: [0.40, 0.50]
 
     const RB_BIN_PLAN = [
       { bin1: 14, bin2: 12, bin3: 14 },
@@ -515,25 +518,37 @@
           }
 
           const nearRatio = nearCount / trials.length;
+          const nearLower = II_NEAR_TARGET - II_NEAR_TOLERANCE;
+          const nearUpper = II_NEAR_TARGET + II_NEAR_TOLERANCE;
           const countA = trials.filter(t => t.label === 'A').length;
           const sfCountsOk = SF_LINES.every(sf => trials.filter(t => t.sf === sf).length === 12);
           const binCounts = { b1: 0, b2: 0, b3: 0 };
+          let nearA = 0, nearB = 0, farA = 0, farB = 0;
           trials.forEach(t => {
             const absOri = Math.abs(Math.round(t.ori));
             if (absOri >= 1 && absOri <= 5) binCounts.b1 += 1;
             else if (absOri >= 6 && absOri <= 10) binCounts.b2 += 1;
             else if (absOri >= 11 && absOri <= 15) binCounts.b3 += 1;
+            if (t.nearFlag) {
+              if (t.label === 'A') nearA += 1; else nearB += 1;
+            } else {
+              if (t.label === 'A') farA += 1; else farB += 1;
+            }
           });
           const binsOk = binCounts.b1 === 16 && binCounts.b2 === 16 && binCounts.b3 === 16;
           const classOk = countA === trials.length / 2;
-          const nearOk = nearRatio >= 0.45 && nearRatio <= 0.60;
-          const nearDiff = Math.abs(nearRatio - 0.525);
-          if (nearDiff < bestNearDiff) {
-            bestNearDiff = nearDiff;
+          const nearOk = nearRatio >= nearLower && nearRatio <= nearUpper;
+          const nearBalanceOk = Math.abs(nearA - nearB) <= 1;
+          const farBalanceOk = Math.abs(farA - farB) <= 1;
+          const nearDiff = Math.abs(nearRatio - II_NEAR_TARGET);
+          const balancePenalty = (Math.abs(nearA - nearB) + Math.abs(farA - farB)) / trials.length;
+          const candidateScore = nearDiff + balancePenalty;
+          if (candidateScore < bestNearDiff) {
+            bestNearDiff = candidateScore;
             bestTrials = trials;
             bestNearRatio = nearRatio;
           }
-          if (sfCountsOk && binsOk && classOk && nearOk) {
+          if (sfCountsOk && binsOk && classOk && nearOk && nearBalanceOk && farBalanceOk) {
             bestTrials = trials;
             bestNearRatio = nearRatio;
             break;
@@ -750,6 +765,7 @@
       const sfCounts = { 3: 0, 4: 0, 5: 0, 6: 0 };
       const binCounts = { b1: 0, b2: 0, b3: 0 };
       let nearCount = 0;
+      let nearA = 0, nearB = 0, farA = 0, farB = 0;
       trials.forEach(t => {
         counts[t.label] = (counts[t.label] || 0) + 1;
         sfCounts[t.sf] = (sfCounts[t.sf] || 0) + 1;
@@ -758,9 +774,14 @@
         else if (absOri >= 6 && absOri <= 10) binCounts.b2 += 1;
         else if (absOri >= 11 && absOri <= 15) binCounts.b3 += 1;
         if (t.nearFlag) nearCount += 1;
+        if (t.nearFlag) {
+          if (t.label === 'A') nearA += 1; else nearB += 1;
+        } else {
+          if (t.label === 'A') farA += 1; else farB += 1;
+        }
       });
       const nearRatioNum = trials.length ? nearCount / trials.length : 0;
-      console.log(`QC ${currentBlockName}: A=${counts.A}, B=${counts.B}, sf3=${sfCounts[3]}, sf4=${sfCounts[4]}, sf5=${sfCounts[5]}, sf6=${sfCounts[6]}, bin1=${binCounts.b1}, bin2=${binCounts.b2}, bin3=${binCounts.b3}, near=${nearRatioNum.toFixed(3)}`);
+      console.log(`QC ${currentBlockName}: A=${counts.A}, B=${counts.B}, sf3=${sfCounts[3]}, sf4=${sfCounts[4]}, sf5=${sfCounts[5]}, sf6=${sfCounts[6]}, bin1=${binCounts.b1}, bin2=${binCounts.b2}, bin3=${binCounts.b3}, near=${nearRatioNum.toFixed(3)}, nearA=${nearA}, nearB=${nearB}, farA=${farA}, farB=${farB}`);
       for (let i = 0; i < trials.length; i++) {
         if (aborted) break;
         const trial = trials[i];
