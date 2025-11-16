@@ -135,8 +135,8 @@
 
     const DELAYED_STAGE_MS = 2000;
 
-    const II_NEAR_TARGET = 0.45;
-    const II_NEAR_TOLERANCE = 0.05; // acceptable range: [0.40, 0.50]
+    const II_NEAR_LOWER = 0.45;
+    const II_NEAR_UPPER = 0.60; // acceptable range: [45%, 60%]
 
     const RB_BIN_PLAN = [
       { bin1: 14, bin2: 12, bin3: 14 },
@@ -476,8 +476,19 @@
       const blocks = [];
       const pairsPerBlock = 24; // 48 trials /2
       for (let blockIdx = 0; blockIdx < 5; blockIdx++) {
+        const ratioRng = hashString(`${participantId}_II_v3_block${blockIdx}_ratio`);
+        const desiredRatio = II_NEAR_LOWER + ratioRng() * (II_NEAR_UPPER - II_NEAR_LOWER);
+        const minNear = Math.ceil(48 * II_NEAR_LOWER);
+        const maxNear = Math.floor(48 * II_NEAR_UPPER);
+        let desiredNear = Math.round(48 * desiredRatio);
+        desiredNear = clamp(desiredNear, minNear, maxNear);
+        if (desiredNear % 2 === 1) {
+          if (desiredNear + 1 <= maxNear) desiredNear += 1; else desiredNear -= 1;
+        }
+        const desiredFar = 48 - desiredNear;
+
         let bestTrials = null;
-        let bestNearDiff = Infinity;
+        let bestScore = Infinity;
         let bestNearRatio = 0;
         for (let attempt = 0; attempt < 10; attempt++) {
           const seed = `${participantId}_II_v3_block${blockIdx}_attempt${attempt}`;
@@ -518,8 +529,6 @@
           }
 
           const nearRatio = nearCount / trials.length;
-          const nearLower = II_NEAR_TARGET - II_NEAR_TOLERANCE;
-          const nearUpper = II_NEAR_TARGET + II_NEAR_TOLERANCE;
           const countA = trials.filter(t => t.label === 'A').length;
           const sfCountsOk = SF_LINES.every(sf => trials.filter(t => t.sf === sf).length === 12);
           const binCounts = { b1: 0, b2: 0, b3: 0 };
@@ -537,18 +546,19 @@
           });
           const binsOk = binCounts.b1 === 16 && binCounts.b2 === 16 && binCounts.b3 === 16;
           const classOk = countA === trials.length / 2;
-          const nearOk = nearRatio >= nearLower && nearRatio <= nearUpper;
-          const nearBalanceOk = Math.abs(nearA - nearB) <= 1;
-          const farBalanceOk = Math.abs(farA - farB) <= 1;
-          const nearDiff = Math.abs(nearRatio - II_NEAR_TARGET);
-          const balancePenalty = (Math.abs(nearA - nearB) + Math.abs(farA - farB)) / trials.length;
-          const candidateScore = nearDiff + balancePenalty;
-          if (candidateScore < bestNearDiff) {
-            bestNearDiff = candidateScore;
+          const nearOk = nearCount === desiredNear || (nearCount >= minNear && nearCount <= maxNear);
+          const nearBalanceOk = nearA === nearB;
+          const farBalanceOk = farA === farB;
+          const nearDiff = Math.abs(nearCount - desiredNear);
+          const balancePenalty = (Math.abs(nearA - nearB) + Math.abs(farA - farB));
+          const ratioPenalty = Math.abs(nearRatio - (desiredNear / trials.length));
+          const candidateScore = nearDiff * 10 + balancePenalty + ratioPenalty;
+          if (candidateScore < bestScore) {
+            bestScore = candidateScore;
             bestTrials = trials;
             bestNearRatio = nearRatio;
           }
-          if (sfCountsOk && binsOk && classOk && nearOk && nearBalanceOk && farBalanceOk) {
+          if (sfCountsOk && binsOk && classOk && nearOk && nearBalanceOk && farBalanceOk && nearCount === desiredNear && farA + farB === desiredFar) {
             bestTrials = trials;
             bestNearRatio = nearRatio;
             break;
