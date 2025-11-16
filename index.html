@@ -121,7 +121,7 @@
     // Configurable constants (do not mutate elsewhere)
     // -------------------------
     const N_RB = 200;
-    const N_II = 200;
+    const N_II = 240;
 
     const USE_FIXATION = true,  FIX_MS = 500;
     const USE_PREBLANK = true, PREBLANK_MS = 200;
@@ -133,36 +133,22 @@
 
     const ORI_JITTER = 0.5;
 
-    const DEFAULT_RB_THRESHOLD = 7;
-    const WEIGHT_SET_A = { W_SF: 0.65, W_ORI: 0.35 }; // 密度优先
-    const WEIGHT_SET_B = { W_SF: 0.35, W_ORI: 0.65 }; // 方向优先
-    const DEFAULT_W_SF = 0.65;
-    const DEFAULT_W_ORI = 0.35;
-    const II_BIAS_A = 0; // 新的平衡排布让 bias=0 也能确保 1:1
-    const II_BIAS_B = 0;
-
-    // 绝对角度→复制次数：每次复制会把正负两个方向都覆盖一次，并遍历 3/4/5/6 条纹。
-    // 该表实现：|ori|∈[1,5] 每 bin 32 试（每条 sf 8 次）、|ori|∈[6,10] 每 bin 36 试（每条 sf 9 次）、|ori|∈[11,15] 每 bin 32 试。
-    const II_MAG_REPLICATES = {
-      1: 2,
-      2: 2,
-      3: 1,
-      4: 1,
-      5: 2,
-      6: 2,
-      7: 2,
-      8: 2,
-      9: 1,
-      10: 2,
-      11: 2,
-      12: 1,
-      13: 1,
-      14: 2,
-      15: 2
-    };
     const DELAYED_STAGE_MS = 2500;
 
-    const CSV_HEADER = ['participant','blockName','trialIndex','sf','ori','label','correctKey','resp','corr','rt','timeout','trialStartUTC'];
+    const RB_BIN_PLAN = [
+      { bin1: 14, bin2: 12, bin3: 14 },
+      { bin1: 12, bin2: 14, bin3: 14 },
+      { bin1: 14, bin2: 14, bin3: 12 },
+      { bin1: 14, bin2: 12, bin3: 14 },
+      { bin1: 12, bin2: 14, bin3: 14 }
+    ];
+
+    const II_BIN_SIZE_PER_BLOCK = 16; // three bins * 16 = 48 per block
+
+    const CSV_HEADER = [
+      'participant','group','orderCode','serial','sessionIndex','movement','task','orderInSession',
+      'blockName','blockIndex','trialIndex','sf','ori','nearFlag','label','correctKey','resp','corr','rt','delayMs','trialStartUTC','qc_near_ratio'
+    ];
 
     // -------------------------
     // DOM references
@@ -182,7 +168,8 @@
     let experimentRunning = false;
     let aborted = false;
     let participantId = '';
-    let participantConfig = null;
+    let participantMeta = null;
+    let sessionConfig = null;
     let dataRows = [];
     let responseState = null;
     let currentBlockName = '';
@@ -236,78 +223,67 @@
     // -------------------------
     // Participant driven configuration
     // -------------------------
-    function deriveParticipantConfig(participant) {
-      const trimmed = (participant || '').trim();
-      let rbThreshold = DEFAULT_RB_THRESHOLD;
-      let rbMode = 'ori';
-      let rbStrictLt = false;
-      let wSf = DEFAULT_W_SF;
-      let wOri = DEFAULT_W_ORI;
-      let delayMs = 0;
-      let iiBias = 0;
+    function parseIdV2(id) {
+      const trimmed = (id || '').trim();
+      const match = trimmed.match(/^([AB])(\d+)-?([12])$/i);
+      const group = match ? match[1].toUpperCase() : 'A';
+      const digits = match ? match[2] : '1';
+      const orderCode = digits[0] === '2' ? '2' : '1';
+      const serial = digits.slice(1) || '000';
+      const sessionIndex = match ? Number(match[3]) : 1;
 
-      const matchLetter = trimmed.match(/[a-zA-Z]/);
-      const matchDigit = trimmed.match(/\d/);
-      if (matchLetter) {
-        const letter = matchLetter[0].toUpperCase();
-        if (letter === 'A') {
-          rbThreshold = 7;
-          rbStrictLt = true;
-          wSf = WEIGHT_SET_A.W_SF;
-          wOri = WEIGHT_SET_A.W_ORI;
-          iiBias = II_BIAS_A;
-        } else if (letter === 'B') {
-          rbMode = 'sf';
-          rbThreshold = DEFAULT_RB_THRESHOLD;
-          wSf = WEIGHT_SET_B.W_SF;
-          wOri = WEIGHT_SET_B.W_ORI;
-          iiBias = II_BIAS_B;
-        }
-      }
-      if (matchDigit) {
-        const digit = matchDigit[0];
-        if (digit === '2') {
-          delayMs = DELAYED_STAGE_MS;
-        } else if (digit === '1') {
-          delayMs = 0;
-        }
-      }
+      const orderPreset1 = [
+        { movement: 'Seated', taskOrder: ['RB', 'II'] },
+        { movement: 'Walking', taskOrder: ['II', 'RB'] }
+      ];
+      const orderPreset2 = [
+        { movement: 'Walking', taskOrder: ['II', 'RB'] },
+        { movement: 'Seated', taskOrder: ['RB', 'II'] }
+      ];
+
+      const preset = orderCode === '2' ? orderPreset2 : orderPreset1;
+      const sessionPlan = preset[(sessionIndex - 1 + preset.length) % preset.length];
+      const delayMs = (group === 'B' && sessionPlan.movement === 'Walking') ? DELAYED_STAGE_MS : 0;
 
       return {
-        RB_ABS_ORI_THRESHOLD: rbThreshold,
-        RB_MODE: rbMode,
-        RB_STRICT_LT: rbStrictLt,
-        W_SF: wSf,
-        W_ORI: wOri,
-        II_BIAS: iiBias,
+        group,
+        orderCode,
+        serial,
+        sessionIndex,
+        movement: sessionPlan.movement,
+        taskOrder: sessionPlan.taskOrder,
         delayMs
       };
+    }
+
+    function sessionParams(sessionIndex) {
+      if (sessionIndex === 2) {
+        return { rbRule: 'A_GT7', wsf: 0.35, wori: 0.65 };
+      }
+      return { rbRule: 'A_LT7', wsf: 0.65, wori: 0.35 };
     }
 
     // -------------------------
     // Labeling functions
     // -------------------------
-    function labelRB(oriDeg, sfLines, cfg) {
-      if (cfg.RB_MODE === 'sf') {
-        return sfLines >= 5 ? 'A' : 'B';
+    function labelRB(oriDeg, rbRule) {
+      const absOri = Math.abs(oriDeg);
+      if (rbRule === 'A_LT7') {
+        return absOri < 7 ? 'A' : 'B';
       }
-      const threshold = cfg.RB_ABS_ORI_THRESHOLD;
-      if (cfg.RB_STRICT_LT) {
-        return Math.abs(oriDeg) < threshold ? 'A' : 'B';
-      }
-      return Math.abs(oriDeg) <= threshold ? 'A' : 'B';
+      return absOri > 7 ? 'A' : 'B';
     }
 
-    function computeIIScore(sfLines, oriDeg, cfg) {
+    function computeIIScore(sfLines, oriDeg, weights) {
       const x = (sfLines - 4.5) / 1.5;
       const y = oriDeg / 15;
-      const raw = cfg.W_SF * x + cfg.W_ORI * y;
-      const bias = cfg.II_BIAS || 0;
-      return { x, y, raw, adjusted: raw - bias };
+      const raw = weights.wsf * x + weights.wori * y;
+      const norm = Math.sqrt(weights.wsf * weights.wsf + weights.wori * weights.wori);
+      return { x, y, raw, norm };
     }
 
-    function labelII(sfLines, oriDeg, cfg) {
-      return computeIIScore(sfLines, oriDeg, cfg).adjusted > 0 ? 'A' : 'B';
+    function labelII(sfLines, oriDeg, weights) {
+      return computeIIScore(sfLines, oriDeg, weights).raw > 0 ? 'A' : 'B';
     }
 
     // -------------------------
@@ -390,142 +366,185 @@
       return result.slice(0, total);
     }
 
-    function jitterOrientationForRB(baseOri, sf, intendedLabel, cfg, rng) {
-      if (cfg.RB_MODE === 'sf') {
-        const jitter = (rng() * 2 - 1) * ORI_JITTER;
-        return clamp(baseOri + jitter, ORI_MIN, ORI_MAX);
+    function symmetricPairMagnitudes(start, end, pairCount) {
+      const mags = [];
+      let mag = start;
+      for (let i = 0; i < pairCount; i++) {
+        mags.push(mag);
+        mag += 1;
+        if (mag > end) mag = start;
       }
-      const threshold = cfg.RB_ABS_ORI_THRESHOLD;
-      let attempt = 0;
-      while (attempt < 8) {
-        const jitter = (rng() * 2 - 1) * ORI_JITTER;
-        const candidate = clamp(baseOri + jitter, ORI_MIN, ORI_MAX);
-        if (labelRB(candidate, sf, cfg) === intendedLabel) {
-          return candidate;
-        }
-        attempt++;
-      }
-      const sign = baseOri === 0 ? 1 : Math.sign(baseOri || 1);
-      if (intendedLabel === 'A') {
-        const boundary = cfg.RB_STRICT_LT ? threshold : threshold + 0.0001;
-        const safeLimit = Math.max(0, boundary - 0.05);
-        const safeMag = Math.min(safeLimit, Math.abs(baseOri));
-        return clamp(sign * safeMag, ORI_MIN, ORI_MAX);
-      }
-      const lower = cfg.RB_STRICT_LT ? threshold : threshold + 0.0001;
-      const safeMag = Math.max(lower + 0.05, Math.abs(baseOri));
-      return clamp(sign * safeMag, ORI_MIN, ORI_MAX);
+      return mags;
     }
 
-    function makeTrialsRB(cfg) {
-      const targetPerClass = N_RB / 2;
-      const orderRng = hashString(`${participantId}_RB_order`);
-      const jitterRng = hashString(`${participantId}_RB_jitter`);
+    function buildRBBin(magStart, magEnd, count, seed, jitterMax = 0.4) {
+      const pairCount = count / 2;
+      const mags = symmetricPairMagnitudes(magStart, magEnd, pairCount);
+      const rng = hashString(seed);
+      const orientations = [];
+      mags.forEach((mag, idx) => {
+        const jitter = (rng() * 2 - 1) * jitterMax;
+        const magWithJitter = clamp(mag + jitter, ORI_MIN, ORI_MAX);
+        orientations.push(magWithJitter, -magWithJitter);
+      });
+      shuffleInPlace(orientations, hashString(`${seed}_shuffle`));
+      return orientations;
+    }
 
-      if (cfg.RB_MODE === 'sf') {
-        const orientA = buildSymmetricOrientationList(0, ORI_MAX, true, targetPerClass, `${participantId}_RB_A_sfOri`);
-        const orientB = buildSymmetricOrientationList(0, ORI_MAX, true, targetPerClass, `${participantId}_RB_B_sfOri`);
-        const sfA = buildSfScheduleForSet(targetPerClass, [5, 6], `${participantId}_RB_A_sf`);
-        const sfB = buildSfScheduleForSet(targetPerClass, [3, 4], `${participantId}_RB_B_sf`);
-        const entries = [
-          ...orientA.map((ori, idx) => ({ baseOri: ori, intendedLabel: 'A', sf: sfA[idx] })),
-          ...orientB.map((ori, idx) => ({ baseOri: ori, intendedLabel: 'B', sf: sfB[idx] }))
-        ];
-        shuffleInPlace(entries, orderRng);
-        return entries.map((entry, idx) => {
-          const ori = jitterOrientationForRB(entry.baseOri, entry.sf, entry.intendedLabel, cfg, jitterRng);
-          const label = labelRB(ori, entry.sf, cfg);
+    function makeTrialsRB_balancedV3(participantId, rbRule) {
+      const blocks = [];
+      const targetPerBlock = 40;
+      const targetPerClass = targetPerBlock / 2;
+      RB_BIN_PLAN.forEach((plan, blockIdx) => {
+        const rngSeed = `${participantId}_RB_v3_block${blockIdx}`;
+        let aBin1 = 0, aBin2 = 0, aBin3 = 0, bBin1 = 0, bBin2 = 0, bBin3 = 0;
+        if (rbRule === 'A_LT7') {
+          aBin1 = plan.bin1;
+          aBin3 = 0;
+          aBin2 = targetPerClass - aBin1;
+          bBin3 = plan.bin3;
+          bBin2 = plan.bin2 - aBin2;
+          bBin1 = 0;
+        } else {
+          aBin3 = plan.bin3;
+          aBin1 = 0;
+          aBin2 = targetPerClass - aBin3;
+          bBin1 = plan.bin1;
+          bBin2 = plan.bin2 - aBin2;
+          bBin3 = 0;
+        }
+        aBin2 = Math.max(0, aBin2);
+        bBin2 = Math.max(0, bBin2);
+
+        const orientations = [];
+        if (aBin1 > 0) orientations.push(...buildRBBin(1, 5, aBin1, `${rngSeed}_a_bin1`));
+        if (bBin1 > 0) orientations.push(...buildRBBin(1, 5, bBin1, `${rngSeed}_b_bin1`));
+
+        if (aBin2 > 0) {
+          const mag = rbRule === 'A_LT7' ? 6 : 9;
+          orientations.push(...buildRBBin(mag, mag, aBin2, `${rngSeed}_a_bin2`));
+        }
+        if (bBin2 > 0) {
+          const mag = rbRule === 'A_LT7' ? 9 : 6;
+          const endMag = rbRule === 'A_LT7' ? 10 : 6;
+          orientations.push(...buildRBBin(mag, endMag, bBin2, `${rngSeed}_b_bin2`));
+        }
+
+        if (aBin3 > 0) orientations.push(...buildRBBin(11, 15, aBin3, `${rngSeed}_a_bin3`));
+        if (bBin3 > 0) orientations.push(...buildRBBin(11, 15, bBin3, `${rngSeed}_b_bin3`));
+
+        shuffleInPlace(orientations, hashString(`${rngSeed}_order`));
+        const sfSchedule = buildSfSchedule(targetPerBlock, `${rngSeed}_sf`);
+        const trials = orientations.map((ori, idx) => {
+          const sf = sfSchedule[idx];
+          const label = labelRB(ori, rbRule);
           return {
-            blockName: 'RB',
+            blockName: `RB-${blockIdx + 1}`,
+            blockIndex: blockIdx + 1,
             trialIndex: idx + 1,
-            sf: entry.sf,
+            sf,
             ori,
+            nearFlag: 0,
             label,
             correctKey: label === 'A' ? 'a' : 'b'
           };
         });
-      }
-
-      const threshold = cfg.RB_ABS_ORI_THRESHOLD;
-      const strict = cfg.RB_STRICT_LT;
-      const aMaxMag = Math.min(ORI_MAX, strict ? Math.ceil(threshold) - 1 : Math.floor(threshold));
-      const bMinMag = Math.max(0, strict ? Math.ceil(threshold) : Math.floor(threshold) + 1);
-      const aOrientations = aMaxMag >= 0
-        ? buildSymmetricOrientationList(0, aMaxMag, true, targetPerClass, `${participantId}_RB_A`)
-        : [];
-      const bOrientations = bMinMag <= ORI_MAX
-        ? buildSymmetricOrientationList(Math.max(1, bMinMag), ORI_MAX, false, targetPerClass, `${participantId}_RB_B`)
-        : [];
-      const entries = [
-        ...aOrientations.map(ori => ({ baseOri: ori, intendedLabel: 'A' })),
-        ...bOrientations.map(ori => ({ baseOri: ori, intendedLabel: 'B' }))
-      ];
-      shuffleInPlace(entries, orderRng);
-      const sfSchedule = buildSfSchedule(entries.length, `${participantId}_RB`);
-      return entries.map((entry, idx) => {
-        const sf = sfSchedule[idx];
-        const ori = jitterOrientationForRB(entry.baseOri, sf, entry.intendedLabel, cfg, jitterRng);
-        const label = labelRB(ori, sf, cfg);
-        return {
-          blockName: 'RB',
-          trialIndex: idx + 1,
-          sf,
-          ori,
-          label,
-          correctKey: label === 'A' ? 'a' : 'b'
-        };
+        blocks.push(trials);
       });
+      return blocks;
     }
 
-    function jitterOrientationForII(baseOri, sf, intendedLabel, cfg, rng) {
-      for (let attempt = 0; attempt < 8; attempt++) {
+    function buildIIPairsForBin(binStart, binEnd, pairCount, seed) {
+      const mags = symmetricPairMagnitudes(binStart, binEnd, pairCount);
+      const rng = hashString(seed);
+      const pairs = [];
+      mags.forEach((mag, idx) => {
         const jitter = (rng() * 2 - 1) * ORI_JITTER;
-        const candidate = clamp(baseOri + jitter, ORI_MIN, ORI_MAX);
-        if (labelII(sf, candidate, cfg) === intendedLabel) {
-          return candidate;
-        }
-      }
-      if (labelII(sf, baseOri, cfg) === intendedLabel) {
-        return baseOri;
-      }
-      return clamp(baseOri, ORI_MIN, ORI_MAX);
+        const magWithJitter = clamp(mag + jitter, ORI_MIN, ORI_MAX);
+        const pos = magWithJitter;
+        const neg = -magWithJitter;
+        pairs.push([pos, neg]);
+      });
+      shuffleInPlace(pairs, hashString(`${seed}_shuffle`));
+      return pairs;
     }
 
-    function buildIIPool() {
-      const pool = [];
-      Object.entries(II_MAG_REPLICATES).forEach(([magStr, repeats]) => {
-        const mag = Number(magStr);
-        const reps = Number(repeats) || 0;
-        if (!reps) return;
-        for (const sign of [-1, 1]) {
-          const baseOri = sign * mag;
-          for (let r = 0; r < reps; r++) {
-            SF_LINES.forEach(sf => {
-              pool.push({ baseOri, sf });
+    function makeTrialsII_balancedV3(participantId, weights) {
+      const blocks = [];
+      const pairsPerBlock = 24; // 48 trials /2
+      for (let blockIdx = 0; blockIdx < 5; blockIdx++) {
+        let bestTrials = null;
+        let bestNearDiff = Infinity;
+        let bestNearRatio = 0;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const seed = `${participantId}_II_v3_block${blockIdx}_attempt${attempt}`;
+          const bin1Pairs = buildIIPairsForBin(1, 5, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin1`);
+          const bin2Pairs = buildIIPairsForBin(6, 10, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin2`);
+          const bin3Pairs = buildIIPairsForBin(11, 15, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin3`);
+          const allPairs = [...bin1Pairs, ...bin2Pairs, ...bin3Pairs];
+          shuffleInPlace(allPairs, hashString(`${seed}_pairOrder`));
+
+          const sfPairs = [];
+          SF_LINES.forEach(sf => {
+            for (let i = 0; i < 6; i++) sfPairs.push(sf);
+          });
+          shuffleInPlace(sfPairs, hashString(`${seed}_sfPairs`));
+
+          const trials = [];
+          let nearCount = 0;
+          for (let p = 0; p < pairsPerBlock; p++) {
+            const sf = sfPairs[p];
+            const pair = allPairs[p % allPairs.length];
+            pair.forEach((ori) => {
+              const score = computeIIScore(sf, ori, weights);
+              const dist = Math.abs(score.raw) / (score.norm || 1);
+              const nearFlag = dist <= 0.5 ? 1 : 0;
+              if (nearFlag) nearCount += 1;
+              const label = score.raw > 0 ? 'A' : 'B';
+              trials.push({
+                blockName: `II-${blockIdx + 1}`,
+                blockIndex: blockIdx + 1,
+                trialIndex: trials.length + 1,
+                sf,
+                ori,
+                nearFlag,
+                label,
+                correctKey: label === 'A' ? 'a' : 'b'
+              });
             });
           }
-        }
-      });
-      return pool;
-    }
 
-    function makeTrialsII(cfg) {
-      const basePool = buildIIPool();
-      const jitterRng = hashString(`${participantId}_II_jitter`);
-      const orderRng = hashString(`${participantId}_II_order`);
-      const trials = basePool.map(item => {
-        const intendedLabel = labelII(item.sf, item.baseOri, cfg);
-        const ori = jitterOrientationForII(item.baseOri, item.sf, intendedLabel, cfg, jitterRng);
-        return {
-          blockName: 'II',
-          sf: item.sf,
-          ori,
-          label: intendedLabel,
-          correctKey: intendedLabel === 'A' ? 'a' : 'b'
-        };
-      });
-      shuffleInPlace(trials, orderRng);
-      return trials.map((trial, idx) => ({ ...trial, trialIndex: idx + 1 }));
+          const nearRatio = nearCount / trials.length;
+          const countA = trials.filter(t => t.label === 'A').length;
+          const sfCountsOk = SF_LINES.every(sf => trials.filter(t => t.sf === sf).length === 12);
+          const binCounts = { b1: 0, b2: 0, b3: 0 };
+          trials.forEach(t => {
+            const absOri = Math.abs(Math.round(t.ori));
+            if (absOri >= 1 && absOri <= 5) binCounts.b1 += 1;
+            else if (absOri >= 6 && absOri <= 10) binCounts.b2 += 1;
+            else if (absOri >= 11 && absOri <= 15) binCounts.b3 += 1;
+          });
+          const binsOk = binCounts.b1 === 16 && binCounts.b2 === 16 && binCounts.b3 === 16;
+          const classOk = countA === trials.length / 2;
+          const nearOk = nearRatio >= 0.45 && nearRatio <= 0.60;
+          const nearDiff = Math.abs(nearRatio - 0.525);
+          if (nearDiff < bestNearDiff) {
+            bestNearDiff = nearDiff;
+            bestTrials = trials;
+            bestNearRatio = nearRatio;
+          }
+          if (sfCountsOk && binsOk && classOk && nearOk) {
+            bestTrials = trials;
+            bestNearRatio = nearRatio;
+            break;
+          }
+        }
+        if (bestTrials) {
+          bestTrials.forEach(t => t.qc_near_ratio = bestNearRatio.toFixed(3));
+          blocks.push(bestTrials);
+        }
+      }
+      return blocks;
     }
     // -------------------------
     // Stimulus rendering
@@ -700,12 +719,48 @@
       }, { passive: false });
     });
 
+    async function waitAnyKey(message) {
+      drawBlank();
+      ctx.fillStyle = '#fff';
+      ctx.font = '24px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(message, displayWidth / 2, displayHeight / 2);
+      return new Promise(resolve => {
+        const handler = () => {
+          document.removeEventListener('keydown', handler);
+          document.removeEventListener('click', handler);
+          drawBlank();
+          resolve();
+        };
+        document.addEventListener('keydown', handler, { once: true });
+        document.addEventListener('click', handler, { once: true });
+      });
+    }
+
     // -------------------------
     // Trial execution
     // -------------------------
-    async function runBlock(blockName, trials) {
-      currentBlockName = blockName;
-      updateStatus('请尽快判断后选择 A 类或 B 类。');
+    async function runBlock(task, trials, orderInSession) {
+      if (!trials || trials.length === 0) return;
+      currentBlockName = trials[0].blockName;
+      const blockIndex = trials[0].blockIndex || 1;
+      const nearRatio = trials[0].qc_near_ratio || '';
+      const counts = { A: 0, B: 0 };
+      const sfCounts = { 3: 0, 4: 0, 5: 0, 6: 0 };
+      const binCounts = { b1: 0, b2: 0, b3: 0 };
+      let nearCount = 0;
+      trials.forEach(t => {
+        counts[t.label] = (counts[t.label] || 0) + 1;
+        sfCounts[t.sf] = (sfCounts[t.sf] || 0) + 1;
+        const absOri = Math.abs(Math.round(t.ori));
+        if (absOri >= 1 && absOri <= 5) binCounts.b1 += 1;
+        else if (absOri >= 6 && absOri <= 10) binCounts.b2 += 1;
+        else if (absOri >= 11 && absOri <= 15) binCounts.b3 += 1;
+        if (t.nearFlag) nearCount += 1;
+      });
+      const nearRatioNum = trials.length ? nearCount / trials.length : 0;
+      console.log(`QC ${currentBlockName}: A=${counts.A}, B=${counts.B}, sf3=${sfCounts[3]}, sf4=${sfCounts[4]}, sf5=${sfCounts[5]}, sf6=${sfCounts[6]}, bin1=${binCounts.b1}, bin2=${binCounts.b2}, bin3=${binCounts.b3}, near=${nearRatioNum.toFixed(3)}`);
       for (let i = 0; i < trials.length; i++) {
         if (aborted) break;
         const trial = trials[i];
@@ -724,9 +779,9 @@
         const response = await waitForResponse();
         clearResponseState();
         drawBlank();
-        if (participantConfig.delayMs > 0) {
+        if (participantMeta.delayMs > 0) {
           drawFixation();
-          await wait(participantConfig.delayMs);
+          await wait(participantMeta.delayMs);
           if (aborted) break;
           drawBlank();
         }
@@ -735,7 +790,6 @@
         }
         let rtSec = '';
         let respKey = response.resp;
-        let timeoutFlag = response.timeout ? 1 : 0;
         if (!response.timeout && response.rtMs != null) {
           rtSec = (response.rtMs / 1000).toFixed(3);
         }
@@ -749,17 +803,27 @@
         if (aborted) break;
         dataRows.push([
           participantId,
+          participantMeta.group,
+          participantMeta.orderCode,
+          participantMeta.serial,
+          participantMeta.sessionIndex,
+          participantMeta.movement,
+          task,
+          orderInSession,
           trial.blockName,
+          blockIndex,
           trial.trialIndex,
           trial.sf,
           trial.ori.toFixed(3),
+          trial.nearFlag,
           trial.label,
           trial.correctKey,
           respKey,
           corr,
           rtSec,
-          timeoutFlag,
-          trialStartUTC
+          participantMeta.delayMs,
+          trialStartUTC,
+          nearRatio || ''
         ]);
       }
     }
@@ -773,11 +837,20 @@
       dataRows = [];
       resizeCanvas();
       window.addEventListener('resize', resizeCanvas);
-      const rbTrials = makeTrialsRB(participantConfig);
-      const iiTrials = makeTrialsII(participantConfig);
-      await runBlock('RB', rbTrials);
-      if (!aborted) {
-        await runBlock('II', iiTrials);
+      const rbBlocks = makeTrialsRB_balancedV3(participantId, sessionConfig.rbRule);
+      const iiBlocks = makeTrialsII_balancedV3(participantId, { wsf: sessionConfig.wsf, wori: sessionConfig.wori });
+      const blockStore = { RB: rbBlocks, II: iiBlocks };
+      for (let t = 0; t < participantMeta.taskOrder.length; t++) {
+        const task = participantMeta.taskOrder[t];
+        const blocks = blockStore[task] || [];
+        for (let b = 0; b < blocks.length; b++) {
+          if (aborted) break;
+          await runBlock(task, blocks[b], t + 1);
+        }
+        if (aborted) break;
+        if (t === 0 && participantMeta.taskOrder.length > 1) {
+          await waitAnyKey('提示：接下来规则将发生变化，请按任意键继续。');
+        }
       }
       if (!aborted) {
         concludeExperiment();
@@ -857,8 +930,10 @@
         return;
       }
       resetState();
-      participantConfig = deriveParticipantConfig(participantId);
-      console.log(`II 判定公式：score = ${participantConfig.W_SF.toFixed(2)} * x + ${participantConfig.W_ORI.toFixed(2)} * y - ${participantConfig.II_BIAS.toFixed(4)} (x=(sf-4.5)/1.5, y=ori/15)`);
+      participantMeta = parseIdV2(participantId);
+      sessionConfig = sessionParams(participantMeta.sessionIndex);
+      console.log(`ID 解析: group=${participantMeta.group}, orderCode=${participantMeta.orderCode}, serial=${participantMeta.serial}, session=${participantMeta.sessionIndex}, movement=${participantMeta.movement}, taskOrder=${participantMeta.taskOrder.join('>')}, delayMs=${participantMeta.delayMs}`);
+      console.log(`II 判定公式：score = ${sessionConfig.wsf.toFixed(2)} * x + ${sessionConfig.wori.toFixed(2)} * y (bias=0, x=(sf-4.5)/1.5, y=ori/15)`);
       startScreen.style.display = 'none';
       experimentContainer.style.display = 'flex';
       updateStatus('正在尝试进入全屏模式...');
