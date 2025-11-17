@@ -133,6 +133,25 @@
 
     const ORI_JITTER = 0.5;
 
+    const ORDER_CODE_PLANS = {
+      '1': {
+        session1: { movement: 'Seated', taskOrder: ['RB', 'II'] },
+        session2: { movement: 'Walking', taskOrder: ['RB', 'II'] }
+      },
+      '2': {
+        session1: { movement: 'Seated', taskOrder: ['II', 'RB'] },
+        session2: { movement: 'Walking', taskOrder: ['II', 'RB'] }
+      },
+      '3': {
+        session1: { movement: 'Walking', taskOrder: ['RB', 'II'] },
+        session2: { movement: 'Seated', taskOrder: ['RB', 'II'] }
+      },
+      '4': {
+        session1: { movement: 'Walking', taskOrder: ['II', 'RB'] },
+        session2: { movement: 'Seated', taskOrder: ['II', 'RB'] }
+      }
+    };
+
     const DELAYED_STAGE_MS = 2000;
 
     const II_NEAR_LOWER = 0.45;
@@ -226,37 +245,50 @@
     // -------------------------
     // Participant driven configuration
     // -------------------------
-    function parseIdV2(id) {
-      const trimmed = (id || '').trim();
-      const match = trimmed.match(/^([AB])(\d+)-?([12])$/i);
-      const group = match ? match[1].toUpperCase() : 'A';
-      const digits = match ? match[2] : '1';
-      const orderCode = digits[0] === '2' ? '2' : '1';
-      const serial = digits.slice(1) || '000';
-      const sessionIndex = match ? Number(match[3]) : 1;
-
-      const orderPreset1 = [
-        { movement: 'Seated', taskOrder: ['RB', 'II'] },
-        { movement: 'Walking', taskOrder: ['II', 'RB'] }
-      ];
-      const orderPreset2 = [
-        { movement: 'Walking', taskOrder: ['II', 'RB'] },
-        { movement: 'Seated', taskOrder: ['RB', 'II'] }
-      ];
-
-      const preset = orderCode === '2' ? orderPreset2 : orderPreset1;
-      const sessionPlan = preset[(sessionIndex - 1 + preset.length) % preset.length];
+    function parseIdV2(id, sessionIndex) {
+      const trimmed = (id || '').trim().toUpperCase();
+      const match = trimmed.match(/^([AB])([1-4])(\d+)$/);
+      if (!match) {
+        return null;
+      }
+      if (sessionIndex !== 1 && sessionIndex !== 2) {
+        return null;
+      }
+      const group = match[1];
+      const orderCode = match[2];
+      const serial = match[3];
+      const plan = ORDER_CODE_PLANS[orderCode];
+      if (!plan) {
+        return null;
+      }
+      const sessionPlan = sessionIndex === 1 ? plan.session1 : plan.session2;
+      if (!sessionPlan) {
+        return null;
+      }
       const delayMs = (group === 'B' && sessionPlan.movement === 'Walking') ? DELAYED_STAGE_MS : 0;
-
       return {
         group,
         orderCode,
         serial,
         sessionIndex,
         movement: sessionPlan.movement,
-        taskOrder: sessionPlan.taskOrder,
+        taskOrder: [...sessionPlan.taskOrder],
         delayMs
       };
+    }
+
+    function requestSessionIndex() {
+      while (true) {
+        const response = window.prompt('本次是第几次进行实验？请选择 1 或 2');
+        if (response === null) {
+          return null;
+        }
+        const trimmed = response.trim();
+        if (trimmed === '1' || trimmed === '2') {
+          return Number(trimmed);
+        }
+        alert('请输入数字 1 或 2。');
+      }
     }
 
     function sessionParams(sessionIndex) {
@@ -960,8 +992,17 @@
         alert('请输入被试编号。');
         return;
       }
+      const sessionIndex = requestSessionIndex();
+      if (!sessionIndex) {
+        alert('请先选择本次场次（1 或 2）。');
+        return;
+      }
       resetState();
-      participantMeta = parseIdV2(participantId);
+      participantMeta = parseIdV2(participantId, sessionIndex);
+      if (!participantMeta) {
+        alert('编号格式应为字母 A/B + 1~4 的编号 + 至少一位序号，例如 A11、B204。');
+        return;
+      }
       sessionConfig = sessionParams(participantMeta.sessionIndex);
       console.log(`ID 解析: group=${participantMeta.group}, orderCode=${participantMeta.orderCode}, serial=${participantMeta.serial}, session=${participantMeta.sessionIndex}, movement=${participantMeta.movement}, taskOrder=${participantMeta.taskOrder.join('>')}, delayMs=${participantMeta.delayMs}`);
       console.log(`II 判定公式：score = ${sessionConfig.wsf.toFixed(2)} * x + ${sessionConfig.wori.toFixed(2)} * y (bias=0, x=(sf-4.5)/1.5, y=ori/15)`);
