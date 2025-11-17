@@ -280,6 +280,60 @@
       return shuffled;
     }
 
+    function analyzeLabelRuns(trials) {
+      let maxRun = 1;
+      let currentRun = 1;
+      for (let i = 1; i < trials.length; i++) {
+        if (trials[i].label === trials[i - 1].label) {
+          currentRun += 1;
+        } else {
+          if (currentRun > maxRun) maxRun = currentRun;
+          currentRun = 1;
+        }
+      }
+      if (currentRun > maxRun) maxRun = currentRun;
+      return maxRun;
+    }
+
+    function maxWindowLabelDiff(trials, windowSize = 12) {
+      if (trials.length < windowSize) return 0;
+      const prefixA = new Array(trials.length + 1).fill(0);
+      for (let i = 0; i < trials.length; i++) {
+        prefixA[i + 1] = prefixA[i] + (trials[i].label === 'A' ? 1 : 0);
+      }
+      let maxDiff = 0;
+      for (let start = 0; start <= trials.length - windowSize; start++) {
+        const countA = prefixA[start + windowSize] - prefixA[start];
+        const countB = windowSize - countA;
+        const diff = Math.abs(countA - countB);
+        if (diff > maxDiff) maxDiff = diff;
+      }
+      return maxDiff;
+    }
+
+    function shuffleIIBlockTrialsWithAntiStreak(trials, seed) {
+      const maxAttempts = 800;
+      let bestCandidate = null;
+      let bestScore = Infinity;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const candidate = shuffleBlockTrials(trials, `${seed}_anti${attempt}`);
+        const maxRun = analyzeLabelRuns(candidate);
+        const windowDiff = maxWindowLabelDiff(candidate, 12);
+        const runPenalty = Math.max(0, maxRun - 3);
+        const windowPenalty = Math.max(0, windowDiff - 2);
+        const score = runPenalty * 100 + windowPenalty * 10 + attempt * 0.001;
+        if (runPenalty === 0 && windowPenalty === 0) {
+          return candidate;
+        }
+        if (score < bestScore) {
+          bestScore = score;
+          bestCandidate = candidate;
+        }
+      }
+      console.warn('II block ordering fell back to best-effort anti-streak sequence', { seed });
+      return bestCandidate || shuffleBlockTrials(trials, `${seed}_fallback`);
+    }
+
     // -------------------------
     // Participant driven configuration
     // -------------------------
@@ -635,8 +689,11 @@
           }
         }
         if (bestTrials) {
-          const shuffled = shuffleBlockTrials(bestTrials, `${participantId}_II_v3_block${blockIdx}_final`);
-          blocks.push(shuffled);
+          const finalOrder = shuffleIIBlockTrialsWithAntiStreak(
+            bestTrials,
+            `${participantId}_II_v3_block${blockIdx}_final`
+          );
+          blocks.push(finalOrder);
         }
       }
       return blocks;
