@@ -210,6 +210,7 @@
 
     const II_NEAR_LOWER = 0.45;
     const II_NEAR_UPPER = 0.60; // acceptable range: [45%, 60%]
+    const II_NEAR_SYMBOLIC_MIN_RATIO = 0.60; // 至少 60% 近样本为“符号型”（x 与 y 同号）
 
     const RB_BIN_PLAN = [
       { bin1: 14, bin2: 12, bin3: 14 },
@@ -391,6 +392,38 @@
       }
       console.warn('II block ordering fell back to best-effort anti-streak sequence', { seed });
       return bestCandidate || shuffleBlockTrials(trials, `${seed}_fallback`);
+    }
+
+    function summarizeIIBlock(trials) {
+      const summary = {
+        total: trials.length,
+        countA: 0,
+        countB: 0,
+        sfCounts: { 3: 0, 4: 0, 5: 0, 6: 0 },
+        binCounts: { b1: 0, b2: 0, b3: 0 },
+        nearCount: 0,
+        nearA: 0,
+        nearB: 0,
+        farA: 0,
+        farB: 0,
+        nearSymbolic: 0
+      };
+      trials.forEach(trial => {
+        if (trial.label === 'A') summary.countA += 1; else summary.countB += 1;
+        if (summary.sfCounts[trial.sf] != null) summary.sfCounts[trial.sf] += 1;
+        const binKey = trial.binKey || determineBinKey(trial.ori);
+        if (binKey && summary.binCounts[binKey] != null) summary.binCounts[binKey] += 1;
+        if (trial.nearFlag) {
+          summary.nearCount += 1;
+          if (trial.label === 'A') summary.nearA += 1; else summary.nearB += 1;
+          if (trial.symbolicFlag) summary.nearSymbolic += 1;
+        } else {
+          if (trial.label === 'A') summary.farA += 1; else summary.farB += 1;
+        }
+      });
+      summary.nearRatio = summary.total ? summary.nearCount / summary.total : 0;
+      summary.nearSymbolicRatio = summary.nearCount ? summary.nearSymbolic / summary.nearCount : 0;
+      return summary;
     }
 
     // -------------------------
@@ -691,6 +724,7 @@
 
           const trials = [];
           let nearCount = 0;
+          let nearSymbolicCount = 0;
           for (let p = 0; p < pairsPerBlock; p++) {
             const sf = sfPairs[p];
             const pair = allPairs[p % allPairs.length];
@@ -699,7 +733,9 @@
               const score = computeIIScore(sf, ori, weights);
               const dist = Math.abs(score.raw) / (score.norm || 1);
               const nearFlag = dist <= 0.5 ? 1 : 0;
+              const symbolicFlag = (Math.sign(score.x) !== 0 && Math.sign(score.x) === Math.sign(score.y)) ? 1 : 0;
               if (nearFlag) nearCount += 1;
+              if (nearFlag && symbolicFlag) nearSymbolicCount += 1;
               const label = score.raw > 0 ? 'A' : 'B';
               trials.push({
                 blockName: `II-${blockIdx + 1}`,
@@ -709,6 +745,7 @@
                 ori,
                 binKey: oriObj.binKey || determineBinKey(ori),
                 nearFlag,
+                symbolicFlag,
                 label,
                 correctKey: label === 'A' ? 'a' : 'b'
               });
@@ -716,6 +753,7 @@
           }
 
           const nearRatio = nearCount / trials.length;
+          const nearSymbolicRatio = nearCount ? (nearSymbolicCount / nearCount) : 0;
           const countA = trials.filter(t => t.label === 'A').length;
           const sfCountsOk = SF_LINES.every(sf => trials.filter(t => t.sf === sf).length === 12);
           const binCounts = { b1: 0, b2: 0, b3: 0 };
@@ -734,20 +772,37 @@
           const nearOk = nearCount === desiredNear || (nearCount >= minNear && nearCount <= maxNear);
           const nearBalanceOk = nearA === nearB;
           const farBalanceOk = farA === farB;
+          const symbolicOk = nearCount === 0 ? false : (nearSymbolicRatio >= II_NEAR_SYMBOLIC_MIN_RATIO);
           const nearDiff = Math.abs(nearCount - desiredNear);
           const balancePenalty = (Math.abs(nearA - nearB) + Math.abs(farA - farB));
           const ratioPenalty = Math.abs(nearRatio - (desiredNear / trials.length));
-          const candidateScore = nearDiff * 10 + balancePenalty + ratioPenalty;
+          const symbolicPenalty = nearCount === 0 ? 100 : Math.max(0, II_NEAR_SYMBOLIC_MIN_RATIO - nearSymbolicRatio) * 100;
+          const candidateScore = nearDiff * 15 + balancePenalty * 2 + ratioPenalty * 100 + symbolicPenalty;
           if (candidateScore < bestScore) {
             bestScore = candidateScore;
             bestTrials = trials;
           }
-          if (sfCountsOk && binsOk && classOk && nearOk && nearBalanceOk && farBalanceOk && nearCount === desiredNear && farA + farB === desiredFar) {
+          if (sfCountsOk && binsOk && classOk && nearOk && nearBalanceOk && farBalanceOk && symbolicOk && nearCount === desiredNear && farA + farB === desiredFar) {
             bestTrials = trials;
             break;
           }
         }
         if (bestTrials) {
+          const summary = summarizeIIBlock(bestTrials);
+          const summaryOk = (
+            summary.countA === summary.countB &&
+            SF_LINES.every(sf => summary.sfCounts[sf] === 12) &&
+            summary.binCounts.b1 === 16 && summary.binCounts.b2 === 16 && summary.binCounts.b3 === 16 &&
+            summary.nearRatio >= II_NEAR_LOWER && summary.nearRatio <= II_NEAR_UPPER &&
+            summary.nearA === summary.nearB && summary.farA === summary.farB &&
+            summary.nearSymbolicRatio >= II_NEAR_SYMBOLIC_MIN_RATIO
+          );
+          if (!summaryOk) {
+            console.warn('II block best-effort schedule deviated from strict target', {
+              block: blockIdx + 1,
+              summary
+            });
+          }
           const finalOrder = shuffleIIBlockTrialsWithAntiStreak(
             bestTrials,
             `${participantId}_II_v3_block${blockIdx}_final`
@@ -1036,12 +1091,14 @@
       const binCounts = { b1: 0, b2: 0, b3: 0 };
       let nearCount = 0;
       let nearA = 0, nearB = 0, farA = 0, farB = 0;
+      let nearSymbolic = 0;
       trials.forEach(t => {
         counts[t.label] = (counts[t.label] || 0) + 1;
         sfCounts[t.sf] = (sfCounts[t.sf] || 0) + 1;
         const binKey = t.binKey || determineBinKey(t.ori);
         if (binKey) binCounts[binKey] += 1;
         if (t.nearFlag) nearCount += 1;
+        if (t.nearFlag && t.symbolicFlag) nearSymbolic += 1;
         if (t.nearFlag) {
           if (t.label === 'A') nearA += 1; else nearB += 1;
         } else {
@@ -1050,6 +1107,7 @@
       });
       const nearRatioNum = trials.length ? nearCount / trials.length : 0;
       const nearRatioStr = task === 'II' ? nearRatioNum.toFixed(3) : '';
+      const symbolicRatioNum = nearCount ? nearSymbolic / nearCount : 0;
       const qcCountsPayload = {
         counts: { ...counts },
         sfCounts: { ...sfCounts },
@@ -1060,11 +1118,13 @@
           nearA,
           nearB,
           farA,
-          farB
+          farB,
+          symbolicCount: nearSymbolic,
+          symbolicRatio: Number(symbolicRatioNum.toFixed(3))
         }
       };
       const qcCountsJson = JSON.stringify(qcCountsPayload);
-      console.log(`QC ${currentBlockName}: A=${counts.A}, B=${counts.B}, sf3=${sfCounts[3]}, sf4=${sfCounts[4]}, sf5=${sfCounts[5]}, sf6=${sfCounts[6]}, bin1=${binCounts.b1}, bin2=${binCounts.b2}, bin3=${binCounts.b3}, near=${nearRatioNum.toFixed(3)}, nearA=${nearA}, nearB=${nearB}, farA=${farA}, farB=${farB}`);
+      console.log(`QC ${currentBlockName}: A=${counts.A}, B=${counts.B}, sf3=${sfCounts[3]}, sf4=${sfCounts[4]}, sf5=${sfCounts[5]}, sf6=${sfCounts[6]}, bin1=${binCounts.b1}, bin2=${binCounts.b2}, bin3=${binCounts.b3}, near=${nearRatioNum.toFixed(3)}, nearA=${nearA}, nearB=${nearB}, farA=${farA}, farB=${farB}, nearSymbolic=${nearSymbolic}`);
       for (let i = 0; i < trials.length; i++) {
         if (aborted) break;
         const trial = trials[i];
