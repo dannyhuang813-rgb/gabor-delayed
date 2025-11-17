@@ -882,11 +882,10 @@
         let resolved = false;
 
         const cleanup = () => {
-          document.removeEventListener('keydown', keyHandler);
-          document.removeEventListener('click', clickHandler);
-          responseButtons.forEach((btn, idx) => {
-            btn.removeEventListener('click', buttonHandlers[idx].clickHandler);
-            btn.removeEventListener('touchend', buttonHandlers[idx].touchHandler);
+          document.removeEventListener('keydown', keyHandler, true);
+          document.removeEventListener('pointerdown', pointerHandler, true);
+          responseButtons.forEach(btn => {
+            btn.removeEventListener('pointerdown', buttonPointerHandler, true);
           });
         };
 
@@ -906,23 +905,21 @@
           }
         };
 
-        const clickHandler = () => {
+        const pointerHandler = (event) => {
+          event.preventDefault();
           finish();
         };
 
-        const buttonHandlers = responseButtons.map(btn => {
-          const clickHandlerBtn = () => finish();
-          const touchHandlerBtn = (event) => {
-            event.preventDefault();
-            finish();
-          };
-          btn.addEventListener('click', clickHandlerBtn);
-          btn.addEventListener('touchend', touchHandlerBtn, { passive: false });
-          return { clickHandler: clickHandlerBtn, touchHandler: touchHandlerBtn };
-        });
+        const buttonPointerHandler = (event) => {
+          event.preventDefault();
+          finish();
+        };
 
-        document.addEventListener('keydown', keyHandler);
-        document.addEventListener('click', clickHandler);
+        document.addEventListener('keydown', keyHandler, true);
+        document.addEventListener('pointerdown', pointerHandler, true);
+        responseButtons.forEach(btn => {
+          btn.addEventListener('pointerdown', buttonPointerHandler, true);
+        });
       });
     }
 
