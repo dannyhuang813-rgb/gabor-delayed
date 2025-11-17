@@ -144,7 +144,7 @@
       },
       '3': {
         session1: { movement: 'Walking', taskOrder: ['RB', 'II'] },
-        session2: { movement: 'Seated', taskOrder: ['RB', 'II'] }
+        session2: { movement: 'Seated', taskOrder: ['II', 'RB'] }
       },
       '4': {
         session1: { movement: 'Walking', taskOrder: ['II', 'RB'] },
@@ -248,6 +248,36 @@
         const j = Math.floor(rng() * (i + 1));
         [array[i], array[j]] = [array[j], array[i]];
       }
+    }
+
+    function shuffleBlockTrials(trials, seed) {
+      const rngShuffle = hashString(`${seed}_shuffle`);
+      const rngSwap = hashString(`${seed}_swap`);
+      const shuffled = trials.map(trial => ({ ...trial }));
+      shuffleInPlace(shuffled, rngShuffle);
+      const tolerance = 0.01;
+      const maxAttempts = Math.max(10, shuffled.length * 2);
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        let violationIndex = -1;
+        for (let i = 0; i < shuffled.length - 1; i++) {
+          const a = shuffled[i];
+          const b = shuffled[i + 1];
+          if (Math.sign(a.ori) !== Math.sign(b.ori) && Math.abs(Math.abs(a.ori) - Math.abs(b.ori)) < tolerance) {
+            violationIndex = i;
+            break;
+          }
+        }
+        if (violationIndex === -1) break;
+        let swapIdx = Math.floor(rngSwap() * shuffled.length);
+        if (swapIdx === violationIndex || swapIdx === violationIndex + 1) {
+          swapIdx = (swapIdx + 2) % shuffled.length;
+        }
+        [shuffled[violationIndex + 1], shuffled[swapIdx]] = [shuffled[swapIdx], shuffled[violationIndex + 1]];
+      }
+      shuffled.forEach((trial, idx) => {
+        trial.trialIndex = idx + 1;
+      });
+      return shuffled;
     }
 
     // -------------------------
@@ -494,7 +524,8 @@
             correctKey: label === 'A' ? 'a' : 'b'
           };
         });
-        blocks.push(trials);
+        const shuffled = shuffleBlockTrials(trials, `${rngSeed}_finalOrder`);
+        blocks.push(shuffled);
       });
       return blocks;
     }
@@ -604,7 +635,8 @@
           }
         }
         if (bestTrials) {
-          blocks.push(bestTrials);
+          const shuffled = shuffleBlockTrials(bestTrials, `${participantId}_II_v3_block${blockIdx}_final`);
+          blocks.push(shuffled);
         }
       }
       return blocks;
@@ -790,14 +822,50 @@
       ctx.textBaseline = 'middle';
       ctx.fillText(message, displayWidth / 2, displayHeight / 2);
       return new Promise(resolve => {
-        const handler = () => {
-          document.removeEventListener('keydown', handler);
-          document.removeEventListener('click', handler);
+        let resolved = false;
+
+        const cleanup = () => {
+          document.removeEventListener('keydown', keyHandler);
+          document.removeEventListener('click', clickHandler);
+          responseButtons.forEach((btn, idx) => {
+            btn.removeEventListener('click', buttonHandlers[idx].clickHandler);
+            btn.removeEventListener('touchend', buttonHandlers[idx].touchHandler);
+          });
+        };
+
+        const finish = () => {
+          if (resolved) return;
+          resolved = true;
+          cleanup();
           drawBlank();
           resolve();
         };
-        document.addEventListener('keydown', handler, { once: true });
-        document.addEventListener('click', handler, { once: true });
+
+        const keyHandler = (event) => {
+          const key = event.key ? event.key.toLowerCase() : '';
+          if (key === 'a' || key === 'b') {
+            event.preventDefault();
+            finish();
+          }
+        };
+
+        const clickHandler = () => {
+          finish();
+        };
+
+        const buttonHandlers = responseButtons.map(btn => {
+          const clickHandlerBtn = () => finish();
+          const touchHandlerBtn = (event) => {
+            event.preventDefault();
+            finish();
+          };
+          btn.addEventListener('click', clickHandlerBtn);
+          btn.addEventListener('touchend', touchHandlerBtn, { passive: false });
+          return { clickHandler: clickHandlerBtn, touchHandler: touchHandlerBtn };
+        });
+
+        document.addEventListener('keydown', keyHandler);
+        document.addEventListener('click', clickHandler);
       });
     }
 
