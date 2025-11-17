@@ -136,11 +136,11 @@
     const ORDER_CODE_PLANS = {
       '1': {
         session1: { movement: 'Seated', taskOrder: ['RB', 'II'] },
-        session2: { movement: 'Walking', taskOrder: ['RB', 'II'] }
+        session2: { movement: 'Walking', taskOrder: ['II', 'RB'] }
       },
       '2': {
         session1: { movement: 'Seated', taskOrder: ['II', 'RB'] },
-        session2: { movement: 'Walking', taskOrder: ['II', 'RB'] }
+        session2: { movement: 'Walking', taskOrder: ['RB', 'II'] }
       },
       '3': {
         session1: { movement: 'Walking', taskOrder: ['RB', 'II'] },
@@ -148,7 +148,7 @@
       },
       '4': {
         session1: { movement: 'Walking', taskOrder: ['II', 'RB'] },
-        session2: { movement: 'Seated', taskOrder: ['II', 'RB'] }
+        session2: { movement: 'Seated', taskOrder: ['RB', 'II'] }
       }
     };
 
@@ -169,7 +169,7 @@
 
     const CSV_HEADER = [
       'participant','group','orderCode','serial','sessionIndex','movement','task','orderInSession',
-      'blockName','blockIndex','trialIndex','sf','ori','nearFlag','label','correctKey','resp','corr','rt','delayMs','trialStartUTC','qc_near_ratio'
+      'blockName','blockIndex','trialIndex','sf','ori','nearFlag','label','correctKey','resp','corr','rt','delayMs','trialStartUTC','qc_near_ratio','qc_counts_json'
     ];
 
     // -------------------------
@@ -219,6 +219,14 @@
 
     function wait(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function determineBinKey(ori) {
+      const absMag = Math.abs(ori);
+      if (absMag >= 1 && absMag <= 5) return 'b1';
+      if (absMag > 5 && absMag <= 10) return 'b2';
+      if (absMag > 10 && absMag <= 15) return 'b3';
+      return null;
     }
 
     function hashString(str) {
@@ -412,7 +420,7 @@
       return mags;
     }
 
-    function buildRBBin(magStart, magEnd, count, seed, jitterMax = 0.4) {
+    function buildRBBin(magStart, magEnd, count, seed, binKey, jitterMax = 0.4) {
       const pairCount = count / 2;
       const mags = symmetricPairMagnitudes(magStart, magEnd, pairCount);
       const rng = hashString(seed);
@@ -420,7 +428,7 @@
       mags.forEach((mag, idx) => {
         const jitter = (rng() * 2 - 1) * jitterMax;
         const magWithJitter = clamp(mag + jitter, ORI_MIN, ORI_MAX);
-        orientations.push(magWithJitter, -magWithJitter);
+        orientations.push({ ori: magWithJitter, binKey }, { ori: -magWithJitter, binKey });
       });
       shuffleInPlace(orientations, hashString(`${seed}_shuffle`));
       return orientations;
@@ -452,26 +460,27 @@
         bBin2 = Math.max(0, bBin2);
 
         const orientations = [];
-        if (aBin1 > 0) orientations.push(...buildRBBin(1, 5, aBin1, `${rngSeed}_a_bin1`));
-        if (bBin1 > 0) orientations.push(...buildRBBin(1, 5, bBin1, `${rngSeed}_b_bin1`));
+        if (aBin1 > 0) orientations.push(...buildRBBin(1, 5, aBin1, `${rngSeed}_a_bin1`, 'b1'));
+        if (bBin1 > 0) orientations.push(...buildRBBin(1, 5, bBin1, `${rngSeed}_b_bin1`, 'b1'));
 
         if (aBin2 > 0) {
           const mag = rbRule === 'A_LT7' ? 6 : 9;
-          orientations.push(...buildRBBin(mag, mag, aBin2, `${rngSeed}_a_bin2`));
+          orientations.push(...buildRBBin(mag, mag, aBin2, `${rngSeed}_a_bin2`, 'b2'));
         }
         if (bBin2 > 0) {
           const mag = rbRule === 'A_LT7' ? 9 : 6;
           const endMag = rbRule === 'A_LT7' ? 10 : 6;
-          orientations.push(...buildRBBin(mag, endMag, bBin2, `${rngSeed}_b_bin2`));
+          orientations.push(...buildRBBin(mag, endMag, bBin2, `${rngSeed}_b_bin2`, 'b2'));
         }
 
-        if (aBin3 > 0) orientations.push(...buildRBBin(11, 15, aBin3, `${rngSeed}_a_bin3`));
-        if (bBin3 > 0) orientations.push(...buildRBBin(11, 15, bBin3, `${rngSeed}_b_bin3`));
+        if (aBin3 > 0) orientations.push(...buildRBBin(11, 15, aBin3, `${rngSeed}_a_bin3`, 'b3'));
+        if (bBin3 > 0) orientations.push(...buildRBBin(11, 15, bBin3, `${rngSeed}_b_bin3`, 'b3'));
 
         shuffleInPlace(orientations, hashString(`${rngSeed}_order`));
         const sfSchedule = buildSfSchedule(targetPerBlock, `${rngSeed}_sf`);
-        const trials = orientations.map((ori, idx) => {
+        const trials = orientations.map((item, idx) => {
           const sf = sfSchedule[idx];
+          const ori = item.ori;
           const label = labelRB(ori, rbRule);
           return {
             blockName: `RB-${blockIdx + 1}`,
@@ -479,6 +488,7 @@
             trialIndex: idx + 1,
             sf,
             ori,
+            binKey: item.binKey || determineBinKey(ori),
             nearFlag: 0,
             label,
             correctKey: label === 'A' ? 'a' : 'b'
@@ -489,15 +499,15 @@
       return blocks;
     }
 
-    function buildIIPairsForBin(binStart, binEnd, pairCount, seed) {
+    function buildIIPairsForBin(binStart, binEnd, pairCount, seed, binKey) {
       const mags = symmetricPairMagnitudes(binStart, binEnd, pairCount);
       const rng = hashString(seed);
       const pairs = [];
       mags.forEach((mag, idx) => {
         const jitter = (rng() * 2 - 1) * ORI_JITTER;
         const magWithJitter = clamp(mag + jitter, ORI_MIN, ORI_MAX);
-        const pos = magWithJitter;
-        const neg = -magWithJitter;
+        const pos = { ori: magWithJitter, binKey };
+        const neg = { ori: -magWithJitter, binKey };
         pairs.push([pos, neg]);
       });
       shuffleInPlace(pairs, hashString(`${seed}_shuffle`));
@@ -521,12 +531,11 @@
 
         let bestTrials = null;
         let bestScore = Infinity;
-        let bestNearRatio = 0;
         for (let attempt = 0; attempt < 10; attempt++) {
           const seed = `${participantId}_II_v3_block${blockIdx}_attempt${attempt}`;
-          const bin1Pairs = buildIIPairsForBin(1, 5, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin1`);
-          const bin2Pairs = buildIIPairsForBin(6, 10, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin2`);
-          const bin3Pairs = buildIIPairsForBin(11, 15, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin3`);
+          const bin1Pairs = buildIIPairsForBin(1, 5, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin1`, 'b1');
+          const bin2Pairs = buildIIPairsForBin(6, 10, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin2`, 'b2');
+          const bin3Pairs = buildIIPairsForBin(11, 15, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin3`, 'b3');
           const allPairs = [...bin1Pairs, ...bin2Pairs, ...bin3Pairs];
           shuffleInPlace(allPairs, hashString(`${seed}_pairOrder`));
 
@@ -541,7 +550,8 @@
           for (let p = 0; p < pairsPerBlock; p++) {
             const sf = sfPairs[p];
             const pair = allPairs[p % allPairs.length];
-            pair.forEach((ori) => {
+            pair.forEach((oriObj) => {
+              const ori = oriObj.ori;
               const score = computeIIScore(sf, ori, weights);
               const dist = Math.abs(score.raw) / (score.norm || 1);
               const nearFlag = dist <= 0.5 ? 1 : 0;
@@ -553,6 +563,7 @@
                 trialIndex: trials.length + 1,
                 sf,
                 ori,
+                binKey: oriObj.binKey || determineBinKey(ori),
                 nearFlag,
                 label,
                 correctKey: label === 'A' ? 'a' : 'b'
@@ -566,10 +577,8 @@
           const binCounts = { b1: 0, b2: 0, b3: 0 };
           let nearA = 0, nearB = 0, farA = 0, farB = 0;
           trials.forEach(t => {
-            const absOri = Math.abs(Math.round(t.ori));
-            if (absOri >= 1 && absOri <= 5) binCounts.b1 += 1;
-            else if (absOri >= 6 && absOri <= 10) binCounts.b2 += 1;
-            else if (absOri >= 11 && absOri <= 15) binCounts.b3 += 1;
+            const binKey = t.binKey || determineBinKey(t.ori);
+            if (binKey) binCounts[binKey] += 1;
             if (t.nearFlag) {
               if (t.label === 'A') nearA += 1; else nearB += 1;
             } else {
@@ -588,16 +597,13 @@
           if (candidateScore < bestScore) {
             bestScore = candidateScore;
             bestTrials = trials;
-            bestNearRatio = nearRatio;
           }
           if (sfCountsOk && binsOk && classOk && nearOk && nearBalanceOk && farBalanceOk && nearCount === desiredNear && farA + farB === desiredFar) {
             bestTrials = trials;
-            bestNearRatio = nearRatio;
             break;
           }
         }
         if (bestTrials) {
-          bestTrials.forEach(t => t.qc_near_ratio = bestNearRatio.toFixed(3));
           blocks.push(bestTrials);
         }
       }
@@ -802,7 +808,6 @@
       if (!trials || trials.length === 0) return;
       currentBlockName = trials[0].blockName;
       const blockIndex = trials[0].blockIndex || 1;
-      const nearRatio = trials[0].qc_near_ratio || '';
       const counts = { A: 0, B: 0 };
       const sfCounts = { 3: 0, 4: 0, 5: 0, 6: 0 };
       const binCounts = { b1: 0, b2: 0, b3: 0 };
@@ -811,10 +816,8 @@
       trials.forEach(t => {
         counts[t.label] = (counts[t.label] || 0) + 1;
         sfCounts[t.sf] = (sfCounts[t.sf] || 0) + 1;
-        const absOri = Math.abs(Math.round(t.ori));
-        if (absOri >= 1 && absOri <= 5) binCounts.b1 += 1;
-        else if (absOri >= 6 && absOri <= 10) binCounts.b2 += 1;
-        else if (absOri >= 11 && absOri <= 15) binCounts.b3 += 1;
+        const binKey = t.binKey || determineBinKey(t.ori);
+        if (binKey) binCounts[binKey] += 1;
         if (t.nearFlag) nearCount += 1;
         if (t.nearFlag) {
           if (t.label === 'A') nearA += 1; else nearB += 1;
@@ -823,6 +826,21 @@
         }
       });
       const nearRatioNum = trials.length ? nearCount / trials.length : 0;
+      const nearRatioStr = task === 'II' ? nearRatioNum.toFixed(3) : '';
+      const qcCountsPayload = {
+        counts: { ...counts },
+        sfCounts: { ...sfCounts },
+        binCounts: { ...binCounts },
+        near: {
+          ratio: Number(nearRatioNum.toFixed(3)),
+          count: nearCount,
+          nearA,
+          nearB,
+          farA,
+          farB
+        }
+      };
+      const qcCountsJson = JSON.stringify(qcCountsPayload);
       console.log(`QC ${currentBlockName}: A=${counts.A}, B=${counts.B}, sf3=${sfCounts[3]}, sf4=${sfCounts[4]}, sf5=${sfCounts[5]}, sf6=${sfCounts[6]}, bin1=${binCounts.b1}, bin2=${binCounts.b2}, bin3=${binCounts.b3}, near=${nearRatioNum.toFixed(3)}, nearA=${nearA}, nearB=${nearB}, farA=${farA}, farB=${farB}`);
       for (let i = 0; i < trials.length; i++) {
         if (aborted) break;
@@ -886,7 +904,8 @@
           rtSec,
           participantMeta.delayMs,
           trialStartUTC,
-          nearRatio || ''
+          nearRatioStr,
+          qcCountsJson
         ]);
       }
     }
