@@ -899,7 +899,7 @@
 
         const keyHandler = (event) => {
           const key = event.key ? event.key.toLowerCase() : '';
-          if (key === 'a' || key === 'b') {
+          if (key === 'a' || key === 'b' || key === ' ' || key === 'spacebar' || key === 'space') {
             event.preventDefault();
             finish();
           }
