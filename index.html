@@ -219,14 +219,10 @@
       2: [{ key: 'II2', blocks: 5 }]
     };
 
-    const II_SINGLE_DIM_MAX_ACCURACY = 0.6;
-    const II_MAX_PLAN_ATTEMPTS = 20;
+    const II_SINGLE_DIM_MAX_ACCURACY = 0.65;
+    const II_MAX_PLAN_ATTEMPTS = 30;
 
     const DELAYED_STAGE_MS = 2000;
-
-    const II_NEAR_LOWER = 0.45;
-    const II_NEAR_UPPER = 0.60; // acceptable range: [45%, 60%]
-    const II_NEAR_SYMBOLIC_MIN_RATIO = 0.60; // 至少 60% 近样本为“符号型”（x 与 y 同号）
 
     const II_BIN_KEYS = ['b1', 'b2', 'b3'];
     const II_BIN_RANGES = {
@@ -414,42 +410,22 @@
       return maxRun;
     }
 
-    function maxWindowLabelDiff(trials, windowSize = 12) {
-      if (trials.length < windowSize) return 0;
-      const prefixA = new Array(trials.length + 1).fill(0);
-      for (let i = 0; i < trials.length; i++) {
-        prefixA[i + 1] = prefixA[i] + (trials[i].label === 'A' ? 1 : 0);
-      }
-      let maxDiff = 0;
-      for (let start = 0; start <= trials.length - windowSize; start++) {
-        const countA = prefixA[start + windowSize] - prefixA[start];
-        const countB = windowSize - countA;
-        const diff = Math.abs(countA - countB);
-        if (diff > maxDiff) maxDiff = diff;
-      }
-      return maxDiff;
-    }
-
     function shuffleIIBlockTrialsWithAntiStreak(trials, seed) {
-      const maxAttempts = 800;
+      const maxAttempts = 400;
       let bestCandidate = null;
-      let bestScore = Infinity;
+      let bestRun = Infinity;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const candidate = shuffleBlockTrials(trials, `${seed}_anti${attempt}`);
         const maxRun = analyzeLabelRuns(candidate);
-        const windowDiff = maxWindowLabelDiff(candidate, 12);
-        const runPenalty = Math.max(0, maxRun - 3);
-        const windowPenalty = Math.max(0, windowDiff - 2);
-        const score = runPenalty * 100 + windowPenalty * 10 + attempt * 0.001;
-        if (runPenalty === 0 && windowPenalty === 0) {
+        if (maxRun <= 4) {
           return candidate;
         }
-        if (score < bestScore) {
-          bestScore = score;
+        if (maxRun < bestRun) {
+          bestRun = maxRun;
           bestCandidate = candidate;
         }
       }
-      console.warn('II block ordering fell back to best-effort anti-streak sequence', { seed });
+      console.warn('II block ordering使用宽松防连串策略仍未满足≤4连串，回退到最佳序列', { seed, bestRun });
       return bestCandidate || shuffleBlockTrials(trials, `${seed}_fallback`);
     }
 
@@ -483,159 +459,6 @@
       summary.nearRatio = summary.total ? summary.nearCount / summary.total : 0;
       summary.nearSymbolicRatio = summary.nearCount ? summary.nearSymbolic / summary.nearCount : 0;
       return summary;
-    }
-
-    function evaluateSfBinBalance(trials, structure) {
-      const sfStats = new Map();
-      const binStats = new Map();
-      const comboMap = new Map();
-      trials.forEach(trial => {
-        const binKey = trial.binKey || determineBinKey(trial.ori);
-        if (!sfStats.has(trial.sf)) {
-          sfStats.set(trial.sf, { A: 0, B: 0 });
-        }
-        if (!binStats.has(binKey)) {
-          binStats.set(binKey, { A: 0, B: 0 });
-        }
-        const sfEntry = sfStats.get(trial.sf);
-        const binEntry = binStats.get(binKey);
-        sfEntry[trial.label] += 1;
-        binEntry[trial.label] += 1;
-        const comboKey = `${trial.sf}_${binKey}`;
-        if (!comboMap.has(comboKey)) {
-          comboMap.set(comboKey, { total: 0, countA: 0, countB: 0 });
-        }
-        const comboEntry = comboMap.get(comboKey);
-        comboEntry.total += 1;
-        comboEntry[`count${trial.label}`] += 1;
-      });
-      const sfOk = SF_LINES.every(sf => {
-        const stats = sfStats.get(sf);
-        return stats && stats.A === stats.B;
-      });
-      const binOk = II_BIN_KEYS.every(binKey => {
-        const stats = binStats.get(binKey);
-        return stats && stats.A === stats.B;
-      });
-      let comboPenalty = 0;
-      let comboMaxDiff = 0;
-      for (const sf of SF_LINES) {
-        for (const binKey of II_BIN_KEYS) {
-          const stats = comboMap.get(`${sf}_${binKey}`) || { total: 0, countA: 0, countB: 0 };
-          const feasibleA = structure ? isLabelFeasible(structure, sf, binKey, 'A') : true;
-          const feasibleB = structure ? isLabelFeasible(structure, sf, binKey, 'B') : true;
-          if (feasibleA && feasibleB) {
-            const diff = Math.abs(stats.countA - stats.countB);
-            if (stats.total === 0) {
-              comboPenalty += 4;
-            } else {
-              comboPenalty += diff;
-            }
-            if (diff > comboMaxDiff) comboMaxDiff = diff;
-          } else if (!feasibleA && !feasibleB) {
-            if (stats.total > 0) {
-              comboPenalty += stats.total * 2;
-            }
-          } else {
-            const impossibleCount = feasibleA ? stats.countB : stats.countA;
-            if (impossibleCount > 0) {
-              comboPenalty += impossibleCount * 10;
-            }
-          }
-        }
-      }
-      return { sfOk, binOk, comboPenalty, comboMaxDiff };
-    }
-
-    function isLabelFeasible(structure, sf, binKey, targetLabel) {
-      const range = II_BIN_RANGES[binKey];
-      if (!range) return false;
-      const steps = 24;
-      const signs = [-1, 1];
-      for (const sign of signs) {
-        for (let i = 0; i <= steps; i++) {
-          const t = i / steps;
-          const mag = range.min + (range.max - range.min) * t;
-          const ori = clamp(sign * mag, ORI_MIN, ORI_MAX);
-          const label = labelII(sf, ori, structure);
-          if (label === targetLabel) {
-            return true;
-          }
-        }
-      }
-      return false;
-    }
-
-    function allocateIIComboCounts(structure, rng) {
-      const perSfLabel = (48 / SF_LINES.length) / 2;
-      const perBinLabel = (48 / II_BIN_KEYS.length) / 2;
-      const feasibleMap = {};
-      const infeasiblePairs = [];
-      for (const label of II_LABELS) {
-        feasibleMap[label] = {};
-        for (const sf of SF_LINES) {
-          const feasibleBins = II_BIN_KEYS.filter(binKey => isLabelFeasible(structure, sf, binKey, label));
-          feasibleMap[label][sf] = feasibleBins;
-          if (!feasibleBins.length) {
-            infeasiblePairs.push({ label, sf });
-          }
-        }
-      }
-      const queue = [];
-      for (const label of II_LABELS) {
-        for (const sf of SF_LINES) {
-          const options = feasibleMap[label][sf];
-          if (!options.length) continue;
-          for (let i = 0; i < perSfLabel; i++) {
-            queue.push({ label, sf, options: options.slice() });
-          }
-        }
-      }
-      if (!queue.length) {
-        console.error('II alloc failed：没有可行的 label/sf 组合', { structure: structure.key });
-        return null;
-      }
-      if (queue.length < 48) {
-        const deficit = 48 - queue.length;
-        console.warn('II alloc shortfall due to infeasible combos，自动补齐', {
-          structure: structure.key,
-          deficit,
-          infeasiblePairs
-        });
-        const clones = [];
-        for (let i = 0; i < deficit; i++) {
-          const src = queue[i % queue.length];
-          clones.push({ label: src.label, sf: src.sf, options: src.options.slice() });
-        }
-        queue.push(...clones);
-      }
-      queue.sort((a, b) => {
-        if (a.options.length !== b.options.length) {
-          return a.options.length - b.options.length;
-        }
-        return (rng() - 0.5);
-      });
-      const remainingBinLabel = {};
-      II_BIN_KEYS.forEach(binKey => {
-        remainingBinLabel[binKey] = { A: perBinLabel, B: perBinLabel };
-      });
-      const allocations = {};
-      for (const item of queue) {
-        const feasibleBins = item.options.filter(binKey => remainingBinLabel[binKey][item.label] > 0);
-        if (!feasibleBins.length) {
-          console.warn('II alloc failed for label-sf pair', { structure: structure.key, sf: item.sf, label: item.label });
-          return null;
-        }
-        feasibleBins.sort((a, b) => remainingBinLabel[b][item.label] - remainingBinLabel[a][item.label]);
-        const topRemaining = remainingBinLabel[feasibleBins[0]][item.label];
-        const bestBins = feasibleBins.filter(binKey => remainingBinLabel[binKey][item.label] === topRemaining);
-        const selected = bestBins[Math.floor(rng() * bestBins.length) % bestBins.length];
-        if (!allocations[selected]) allocations[selected] = {};
-        if (!allocations[selected][item.sf]) allocations[selected][item.sf] = { A: 0, B: 0 };
-        allocations[selected][item.sf][item.label] += 1;
-        remainingBinLabel[selected][item.label] -= 1;
-      }
-      return allocations;
     }
 
     // -------------------------
@@ -1059,97 +882,59 @@
       if (!config) return [];
       const structure = getIIStructureConfig(config.structureKey);
       if (!structure) return [];
-      const perLabelTotal = II_TRIALS_PER_BLOCK / 2;
       let bestBlocks = null;
       let bestScore = Infinity;
+      let bestHeuristic = Infinity;
       for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
         const rng = hashString(`GAUSS_II_SESSION${sessionIndex}_attempt${attempt}`);
         const blocks = [];
+        let planPenalty = 0;
         let failed = false;
         for (let blockIdx = 0; blockIdx < II_BLOCK_COUNT; blockIdx++) {
-          const allocations = allocateIIComboCounts(structure, rng);
-          if (!allocations) {
-            failed = true;
-            break;
-          }
-          const minNear = Math.round(II_TRIALS_PER_BLOCK * II_NEAR_LOWER);
-          const maxNear = Math.round(II_TRIALS_PER_BLOCK * II_NEAR_UPPER);
-          let targetNear = Math.round(II_TRIALS_PER_BLOCK * (II_NEAR_LOWER + (II_NEAR_UPPER - II_NEAR_LOWER) * rng()));
-          targetNear = clamp(targetNear, minNear, maxNear);
-          if (targetNear % 2 === 1) {
-            targetNear += targetNear < maxNear ? 1 : -1;
-          }
-          let farTotal = II_TRIALS_PER_BLOCK - targetNear;
-          if (farTotal % 2 === 1) {
-            if (targetNear > minNear) {
-              targetNear -= 1;
-            } else if (targetNear < maxNear) {
-              targetNear += 1;
-            }
-            farTotal = II_TRIALS_PER_BLOCK - targetNear;
-          }
-          const nearQuota = {
-            A: targetNear / 2,
-            B: targetNear / 2
-          };
-          const farQuota = {
-            A: farTotal / 2,
-            B: farTotal / 2
-          };
-          const nearCounts = { A: 0, B: 0 };
-          const farCounts = { A: 0, B: 0 };
           const blockTrials = [];
-          for (const binKey of II_BIN_KEYS) {
-            if (failed) break;
-            for (const sf of SF_LINES) {
-              if (failed) break;
-              const cell = allocations[binKey]?.[sf];
-              if (!cell) continue;
-              for (const label of II_LABELS) {
-                const need = cell[label] || 0;
-                for (let rep = 0; rep < need; rep++) {
-                  const remainingNear = nearQuota[label] - nearCounts[label];
-                  const remainingFar = farQuota[label] - farCounts[label];
-                  let desiredZone = 'any';
-                  if (remainingNear > 0 && remainingFar > 0) {
-                    desiredZone = remainingNear >= remainingFar ? 'near' : 'far';
-                  } else if (remainingNear > 0) {
-                    desiredZone = 'near';
-                  } else if (remainingFar > 0) {
-                    desiredZone = 'far';
-                  }
-                  const stim = sampleIIStimulusMatching(sessionIndex, label, structure, sf, binKey, desiredZone, rng);
-                  if (!stim) {
-                    failed = true;
-                    break;
-                  }
-                  blockTrials.push(stim);
-                  if (stim.nearFlag) {
-                    nearCounts[label] += 1;
-                  } else {
-                    farCounts[label] += 1;
-                  }
+          const labelCounts = { A: 0, B: 0 };
+          const sfCounts = { 3: 0, 4: 0, 5: 0, 6: 0 };
+          const binCounts = { b1: 0, b2: 0, b3: 0 };
+          const comboCounts = {};
+          const guardLimit = II_TRIALS_PER_BLOCK * 800;
+          let guard = 0;
+          while (blockTrials.length < II_TRIALS_PER_BLOCK && guard < guardLimit) {
+            guard += 1;
+            const targetLabel = labelCounts.A <= labelCounts.B ? 'A' : 'B';
+            const targetSf = SF_LINES[Math.floor(rng() * SF_LINES.length)];
+            const targetBin = II_BIN_KEYS[Math.floor(rng() * II_BIN_KEYS.length)];
+            const stim = sampleIIStimulusMatching(sessionIndex, targetLabel, structure, targetSf, targetBin, 'any', rng);
+            if (!stim) continue;
+            blockTrials.push(stim);
+            labelCounts[stim.label] += 1;
+            sfCounts[stim.sf] += 1;
+            binCounts[stim.binKey] += 1;
+            const comboKey = `${stim.sf}_${stim.binKey}_${stim.label}`;
+            comboCounts[comboKey] = (comboCounts[comboKey] || 0) + 1;
+          }
+          if (blockTrials.length !== II_TRIALS_PER_BLOCK) {
+            failed = true;
+            break;
+          }
+          const sfIdeal = II_TRIALS_PER_BLOCK / SF_LINES.length;
+          const binIdeal = II_TRIALS_PER_BLOCK / II_BIN_KEYS.length;
+          let blockPenalty = 0;
+          SF_LINES.forEach(sf => {
+            blockPenalty += Math.abs(sfCounts[sf] - sfIdeal);
+          });
+          II_BIN_KEYS.forEach(binKey => {
+            blockPenalty += Math.abs(binCounts[binKey] - binIdeal);
+          });
+          SF_LINES.forEach(sf => {
+            II_BIN_KEYS.forEach(binKey => {
+              II_LABELS.forEach(label => {
+                if (!comboCounts[`${sf}_${binKey}_${label}`]) {
+                  blockPenalty += 2;
                 }
-                if (failed) break;
-              }
-            }
-          }
-          if (failed || blockTrials.length !== II_TRIALS_PER_BLOCK) {
-            failed = true;
-            break;
-          }
-          const summary = summarizeIIBlock(blockTrials);
-          if (
-            summary.countA !== summary.countB ||
-            summary.nearA !== summary.nearB ||
-            summary.farA !== summary.farB ||
-            summary.nearRatio < II_NEAR_LOWER ||
-            summary.nearRatio > II_NEAR_UPPER ||
-            summary.nearSymbolicRatio < II_NEAR_SYMBOLIC_MIN_RATIO
-          ) {
-            failed = true;
-            break;
-          }
+              });
+            });
+          });
+          planPenalty += blockPenalty;
           const ordered = shuffleIIBlockTrialsWithAntiStreak(blockTrials, `GAUSS_II_SESSION${sessionIndex}_block${blockIdx}_attempt${attempt}`);
           ordered.forEach((trial, idx) => {
             trial.blockName = `II-${blocks.length + 1}`;
@@ -1161,17 +946,19 @@
         if (failed) continue;
         const flat = blocks.flat();
         const heur = evaluateSingleDimHeuristics(flat);
+        const score = heur * 100 + planPenalty;
         if (heur <= II_SINGLE_DIM_MAX_ACCURACY) {
-          console.log(`II session ${sessionIndex}: 单维启发式最大正确率 ${heur.toFixed(3)} ≤ ${II_SINGLE_DIM_MAX_ACCURACY}`);
+          console.log(`II session ${sessionIndex}: 单维启发式最大正确率 ${heur.toFixed(3)} ≤ ${II_SINGLE_DIM_MAX_ACCURACY}，计划得分 ${planPenalty.toFixed(1)}`);
           return blocks;
         }
-        if (heur < bestScore) {
-          bestScore = heur;
+        if (score < bestScore) {
+          bestScore = score;
           bestBlocks = blocks;
+          bestHeuristic = heur;
         }
       }
       if (bestBlocks) {
-        console.warn(`II session ${sessionIndex}: 未达到单维阈值，使用最佳候选 (max acc=${bestScore.toFixed(3)})`);
+        console.warn(`II session ${sessionIndex}: 未达到单维阈值 ${II_SINGLE_DIM_MAX_ACCURACY}，使用最佳候选 (max acc=${bestHeuristic.toFixed(3)})`);
         return bestBlocks;
       }
       console.error(`II session ${sessionIndex}: 无法生成高斯刺激计划`);
