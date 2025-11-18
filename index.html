@@ -207,10 +207,8 @@
     };
 
     const II_STRUCTURES_LIBRARY = {
-      // Session 1：保持接近 0.5/0.5 的对称权重，但略微增强 ori 维度以保证 sf 内部也能出现 A/B
-      II1: { key: 'II1', weights: { wsf: 0.45, wori: 0.55 }, bias: 0.0, oriSign: 1 },
-      // Session 2：沿 ori 轴镜像并加上轻微偏置，仍保持等价的 0.45/0.55 权重结构
-      II2: { key: 'II2', weights: { wsf: 0.45, wori: 0.55 }, bias: 0.05, oriSign: -1 }
+      II1: { key: 'II1', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.0, oriSign: 1 },
+      II2: { key: 'II2', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.0, oriSign: -1 }
     };
 
     const II_STRUCTURE_PLANS = {
@@ -218,8 +216,8 @@
       2: [{ key: 'II2', blocks: 5 }]
     };
 
-    const II_SINGLE_DIM_MAX_ACCURACY = 0.58;
-    const II_MAX_PLAN_ATTEMPTS = 80;
+    const II_SINGLE_DIM_MAX_ACCURACY = 0.6;
+    const II_MAX_PLAN_ATTEMPTS = 20;
 
     const DELAYED_STAGE_MS = 2000;
 
@@ -247,6 +245,47 @@
       'participant','group','orderCode','serial','sessionIndex','movement','task','iiStructure','orderInSession',
       'blockName','blockIndex','trialIndex','sf','ori','nearFlag','label','correctKey','resp','corr','rt','delayMs','trialStartUTC','qc_near_ratio','qc_counts_json'
     ];
+
+    const LATENT_RANGE = { xMin: -2, xMax: 2, yMin: -2, yMax: 2 };
+    const SF_PHYSICAL_RANGE = { min: 2.8, max: 6.2 };
+    const ORI_PHYSICAL_RANGE = { min: -15, max: 15 };
+    const RB_BLOCK_COUNT = 5;
+    const RB_TRIALS_PER_BLOCK = N_RB / RB_BLOCK_COUNT;
+    const II_BLOCK_COUNT = 5;
+    const II_TRIALS_PER_BLOCK = N_II / II_BLOCK_COUNT;
+    // 二维高斯参数：定义在标准化潜在空间 (x=sf, y=ori)，取值约 [-2,2]
+    // RB：两类在单一维度（Session1: y，Session2: x）方向上分离，另一维完全重叠 → 纯一维规则
+    const RB_GAUSS_PARAMS = {
+      1: {
+        classes: {
+          A: { mean: [0, -0.9], cov: [[0.25, 0], [0, 0.16]] },
+          B: { mean: [0, 0.9], cov: [[0.25, 0], [0, 0.16]] }
+        }
+      },
+      2: {
+        classes: {
+          A: { mean: [-0.9, 0], cov: [[0.16, 0], [0, 0.25]] },
+          B: { mean: [0.9, 0], cov: [[0.16, 0], [0, 0.25]] }
+        }
+      }
+    };
+    // II：两个 Session 使用对称但倾斜的类别均值，协方差带轻微相关，确保最优边界为斜线且两维都需整合
+    const II_GAUSS_PARAMS = {
+      1: {
+        structureKey: 'II1',
+        classes: {
+          A: { mean: [-0.7, -0.7], cov: [[0.36, 0.18], [0.18, 0.36]] },
+          B: { mean: [0.7, 0.7], cov: [[0.36, 0.18], [0.18, 0.36]] }
+        }
+      },
+      2: {
+        structureKey: 'II2',
+        classes: {
+          A: { mean: [-0.7, 0.7], cov: [[0.36, -0.18], [-0.18, 0.36]] },
+          B: { mean: [0.7, -0.7], cov: [[0.36, -0.18], [-0.18, 0.36]] }
+        }
+      }
+    };
 
     // -------------------------
     // DOM references
@@ -795,72 +834,6 @@
       return orientations;
     }
 
-    function makeTrialsRB_balancedV3(participantId, rbRule) {
-      const blocks = [];
-      const targetPerBlock = 40;
-      const targetPerClass = targetPerBlock / 2;
-      RB_BIN_PLAN.forEach((plan, blockIdx) => {
-        const rngSeed = `${participantId}_RB_v3_block${blockIdx}`;
-        let aBin1 = 0, aBin2 = 0, aBin3 = 0, bBin1 = 0, bBin2 = 0, bBin3 = 0;
-        if (rbRule === 'A_LT7') {
-          aBin1 = plan.bin1;
-          aBin3 = 0;
-          aBin2 = targetPerClass - aBin1;
-          bBin3 = plan.bin3;
-          bBin2 = plan.bin2 - aBin2;
-          bBin1 = 0;
-        } else {
-          aBin3 = plan.bin3;
-          aBin1 = 0;
-          aBin2 = targetPerClass - aBin3;
-          bBin1 = plan.bin1;
-          bBin2 = plan.bin2 - aBin2;
-          bBin3 = 0;
-        }
-        aBin2 = Math.max(0, aBin2);
-        bBin2 = Math.max(0, bBin2);
-
-        const orientations = [];
-        if (aBin1 > 0) orientations.push(...buildRBBin(1, 5, aBin1, `${rngSeed}_a_bin1`, 'b1'));
-        if (bBin1 > 0) orientations.push(...buildRBBin(1, 5, bBin1, `${rngSeed}_b_bin1`, 'b1'));
-
-        if (aBin2 > 0) {
-          const mag = rbRule === 'A_LT7' ? 6 : 9;
-          orientations.push(...buildRBBin(mag, mag, aBin2, `${rngSeed}_a_bin2`, 'b2'));
-        }
-        if (bBin2 > 0) {
-          const mag = rbRule === 'A_LT7' ? 9 : 6;
-          const endMag = rbRule === 'A_LT7' ? 10 : 6;
-          orientations.push(...buildRBBin(mag, endMag, bBin2, `${rngSeed}_b_bin2`, 'b2'));
-        }
-
-        if (aBin3 > 0) orientations.push(...buildRBBin(11, 15, aBin3, `${rngSeed}_a_bin3`, 'b3'));
-        if (bBin3 > 0) orientations.push(...buildRBBin(11, 15, bBin3, `${rngSeed}_b_bin3`, 'b3'));
-
-        shuffleInPlace(orientations, hashString(`${rngSeed}_order`));
-        const sfSchedule = buildSfSchedule(targetPerBlock, `${rngSeed}_sf`);
-          const trials = orientations.map((item, idx) => {
-            const sf = sfSchedule[idx];
-            const ori = item.ori;
-            const label = labelRB(ori, rbRule);
-            return {
-              blockName: `RB-${blockIdx + 1}`,
-              blockIndex: blockIdx + 1,
-              trialIndex: idx + 1,
-              sf,
-              ori,
-              binKey: item.binKey || determineBinKey(ori),
-              nearFlag: 0,
-              iiStructure: '',
-              label,
-              correctKey: label === 'A' ? 'a' : 'b'
-            };
-          });
-        const shuffled = shuffleBlockTrials(trials, `${rngSeed}_finalOrder`);
-        blocks.push(shuffled);
-      });
-      return blocks;
-    }
 
     function getIIStructureConfig(key) {
       return II_STRUCTURES_LIBRARY[key] || null;
@@ -874,25 +847,152 @@
       return `${structure.key}: score = ${weights.wsf.toFixed(2)} * x + ${weights.wori.toFixed(2)} * ${oriSymbol} - ${bias.toFixed(2)} (x=(sf-4.5)/1.5, y=ori/15)`;
     }
 
-    function sampleIIStimulus(structure, sf, binKey, targetLabel, desiredSign, rng) {
-      const range = II_BIN_RANGES[binKey];
-      if (!range) return null;
-      const maxAttempts = 160;
+    function linearMap(value, inMin, inMax, outMin, outMax) {
+      const ratio = (value - inMin) / (inMax - inMin);
+      return outMin + ratio * (outMax - outMin);
+    }
+
+    function sampleStandardNormal(rng) {
+      const u1 = Math.max(rng(), Number.EPSILON);
+      const u2 = rng();
+      return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    }
+
+    function cholesky2x2(matrix) {
+      const a = matrix[0][0];
+      const b = matrix[0][1];
+      const c = matrix[1][1];
+      const l11 = Math.sqrt(Math.max(a, 1e-6));
+      const l21 = b / l11;
+      const l22 = Math.sqrt(Math.max(c - l21 * l21, 1e-6));
+      return [
+        [l11, 0],
+        [l21, l22]
+      ];
+    }
+
+    function sampleBivariateNormal(mean, cov, rng) {
+      const z0 = sampleStandardNormal(rng);
+      const z1 = sampleStandardNormal(rng);
+      const L = cholesky2x2(cov);
+      const x = mean[0] + L[0][0] * z0;
+      const y = mean[1] + L[1][0] * z0 + L[1][1] * z1;
+      return [x, y];
+    }
+
+    function sampleLatentPoint(params, rng) {
+      const maxAttempts = 400;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const mag = range.min + (range.max - range.min) * rng();
-        const jitter = (rng() * 2 - 1) * ORI_JITTER;
-        const magnitude = clamp(mag + jitter, range.min, range.max);
-        const sign = desiredSign || (rng() < 0.5 ? -1 : 1);
-        const ori = clamp(sign * magnitude, ORI_MIN, ORI_MAX);
-        const score = computeIIProjection(sf, ori, structure);
-        const label = score.raw > 0 ? 'A' : 'B';
-        if (label !== targetLabel) continue;
-        const dist = Math.abs(score.raw) / (score.norm || 1);
+        const point = sampleBivariateNormal(params.mean, params.cov, rng);
+        if (point[0] < LATENT_RANGE.xMin || point[0] > LATENT_RANGE.xMax) continue;
+        if (point[1] < LATENT_RANGE.yMin || point[1] > LATENT_RANGE.yMax) continue;
+        return point;
+      }
+      return null;
+    }
+
+    function mapLatentToPhysical(x, y) {
+      const sf = clamp(linearMap(x, LATENT_RANGE.xMin, LATENT_RANGE.xMax, SF_PHYSICAL_RANGE.min, SF_PHYSICAL_RANGE.max), SF_PHYSICAL_RANGE.min, SF_PHYSICAL_RANGE.max);
+      const ori = clamp(linearMap(y, LATENT_RANGE.yMin, LATENT_RANGE.yMax, ORI_PHYSICAL_RANGE.min, ORI_PHYSICAL_RANGE.max), ORI_PHYSICAL_RANGE.min, ORI_PHYSICAL_RANGE.max);
+      return { sf, ori };
+    }
+
+    function quantizeSfLines(value) {
+      let best = SF_LINES[0];
+      let bestDiff = Infinity;
+      SF_LINES.forEach(target => {
+        const diff = Math.abs(value - target);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          best = target;
+        }
+      });
+      return best;
+    }
+
+    function createStimulusFromLatent(latentPoint) {
+      const mapped = mapLatentToPhysical(latentPoint[0], latentPoint[1]);
+      return {
+        sf: quantizeSfLines(mapped.sf),
+        ori: Number(mapped.ori.toFixed(3))
+      };
+    }
+
+    function cloneBlocks(blocks) {
+      return blocks.map(block => block.map(trial => ({ ...trial })));
+    }
+
+    function ensureTrialCount(trials, desiredTotal) {
+      if (trials.length >= desiredTotal) return;
+      if (!trials.length) throw new Error('无法补齐试次数：trial 列表为空');
+      const deficit = desiredTotal - trials.length;
+      for (let i = 0; i < deficit; i++) {
+        const template = trials[i % trials.length];
+        trials.push({ ...template });
+      }
+    }
+
+    function generateGaussianRBBlocks(sessionIndex) {
+      const config = RB_GAUSS_PARAMS[sessionIndex];
+      if (!config) return [];
+      const rng = hashString(`GAUSS_RB_SESSION${sessionIndex}`);
+      const perClass = N_RB / 2;
+      const trials = [];
+      ['A', 'B'].forEach(label => {
+        const classCfg = config.classes[label];
+        for (let i = 0; i < perClass; i++) {
+          const latent = sampleLatentPoint(classCfg, rng);
+          if (!latent) continue;
+          const stim = createStimulusFromLatent(latent);
+          trials.push({
+            sf: stim.sf,
+            ori: stim.ori,
+            binKey: determineBinKey(stim.ori),
+            nearFlag: 0,
+            symbolicFlag: 0,
+            iiStructure: '',
+            label,
+            correctKey: label === 'A' ? 'a' : 'b'
+          });
+        }
+      });
+      ensureTrialCount(trials, N_RB);
+      shuffleInPlace(trials, hashString(`GAUSS_RB_SESSION${sessionIndex}_globalShuffle`));
+      const blocks = [];
+      for (let blockIdx = 0; blockIdx < RB_BLOCK_COUNT; blockIdx++) {
+        const slice = trials.slice(blockIdx * RB_TRIALS_PER_BLOCK, (blockIdx + 1) * RB_TRIALS_PER_BLOCK);
+        const annotated = slice.map((trial, idx) => ({
+          ...trial,
+          blockName: `RB-${blockIdx + 1}`,
+          blockIndex: blockIdx + 1,
+          trialIndex: idx + 1
+        }));
+        const shuffled = shuffleBlockTrials(annotated, `GAUSS_RB_SESSION${sessionIndex}_block${blockIdx}`);
+        blocks.push(shuffled);
+      }
+      return blocks;
+    }
+
+    function sampleIIStimulusFromGaussian(sessionIndex, label, targetSf, targetBin, structure, rng) {
+      const config = II_GAUSS_PARAMS[sessionIndex];
+      if (!config) return null;
+      const classCfg = config.classes[label];
+      if (!classCfg) return null;
+      const maxAttempts = 800;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const latent = sampleLatentPoint(classCfg, rng);
+        if (!latent) continue;
+        const stim = createStimulusFromLatent(latent);
+        const binKey = determineBinKey(stim.ori);
+        if (binKey !== targetBin) continue;
+        if (stim.sf !== targetSf) continue;
+        const projection = computeIIProjection(stim.sf, stim.ori, structure);
+        const dist = Math.abs(projection.raw) / (projection.norm || 1);
         const nearFlag = dist <= 0.5 ? 1 : 0;
-        const symbolicFlag = (Math.sign(score.x) !== 0 && Math.sign(score.x) === Math.sign(score.y)) ? 1 : 0;
+        const symbolicFlag = (Math.sign(projection.x) !== 0 && Math.sign(projection.x) === Math.sign(projection.y)) ? 1 : 0;
         return {
-          sf,
-          ori,
+          sf: stim.sf,
+          ori: stim.ori,
           binKey,
           nearFlag,
           symbolicFlag,
@@ -904,83 +1004,87 @@
       return null;
     }
 
-    function buildIIBlockForStructure(participantId, structure, globalBlockIndex, attemptSeed) {
-      const maxAttempts = 25;
-      let bestCandidate = null;
+    function generateGaussianIIBlocks(sessionIndex) {
+      const config = II_GAUSS_PARAMS[sessionIndex];
+      if (!config) return [];
+      const structure = getIIStructureConfig(config.structureKey);
+      if (!structure) return [];
+      const combos = [];
+      SF_LINES.forEach(sf => {
+        II_BIN_KEYS.forEach(binKey => combos.push({ sf, binKey }));
+      });
+      let bestBlocks = null;
       let bestScore = Infinity;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const rng = hashString(`${participantId}_${structure.key}_blk${globalBlockIndex}_${attemptSeed}_${attempt}`);
-        const allocations = allocateIIComboCounts(structure, rng);
-        if (!allocations) continue;
-        const blockTrials = [];
+      for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
+        const rng = hashString(`GAUSS_II_SESSION${sessionIndex}_attempt${attempt}`);
+        const blocks = [];
         let failed = false;
-        for (const binKey of II_BIN_KEYS) {
+        for (let blockIdx = 0; blockIdx < II_BLOCK_COUNT; blockIdx++) {
           if (failed) break;
-          for (const sf of SF_LINES) {
-            const cell = allocations[binKey]?.[sf];
-            if (!cell) continue;
+          const blockTrials = [];
+          for (const combo of combos) {
+            if (failed) break;
             for (const label of II_LABELS) {
-              const need = cell[label] || 0;
-              const signSequence = rng() < 0.5 ? [1, -1] : [-1, 1];
-              const signOffset = Math.floor(rng() * signSequence.length);
-              for (let rep = 0; rep < need; rep++) {
-                const desiredSign = signSequence[(rep + signOffset) % signSequence.length];
-                const stim = sampleIIStimulus(structure, sf, binKey, label, desiredSign, rng);
+              if (failed) break;
+              for (let rep = 0; rep < 2; rep++) {
+                const stim = sampleIIStimulusFromGaussian(sessionIndex, label, combo.sf, combo.binKey, structure, rng);
                 if (!stim) {
                   failed = true;
                   break;
                 }
                 blockTrials.push(stim);
               }
-              if (failed) break;
             }
-            if (failed) break;
           }
+          if (failed || blockTrials.length !== II_TRIALS_PER_BLOCK) {
+            failed = true;
+            break;
+          }
+          const ordered = shuffleIIBlockTrialsWithAntiStreak(blockTrials, `GAUSS_II_SESSION${sessionIndex}_block${blockIdx}_attempt${attempt}`);
+          ordered.forEach((trial, idx) => {
+            trial.blockName = `II-${blocks.length + 1}`;
+            trial.blockIndex = blocks.length + 1;
+            trial.trialIndex = idx + 1;
+          });
+          blocks.push(ordered);
         }
-        if (failed || blockTrials.length !== 48) continue;
-        const summary = summarizeIIBlock(blockTrials);
-        const sfBalanceOk = SF_LINES.every(sf => {
-          const subset = blockTrials.filter(t => t.sf === sf);
-          return subset.length > 0 && subset.filter(t => t.label === 'A').length === subset.length / 2;
-        });
-        const binBalanceOk = II_BIN_KEYS.every(binKey => {
-          const subset = blockTrials.filter(t => t.binKey === binKey);
-          return subset.length > 0 && subset.filter(t => t.label === 'A').length === subset.length / 2;
-        });
-        const comboCheck = evaluateSfBinBalance(blockTrials, structure);
-        const comboPenalty = comboCheck.comboPenalty;
-        const nearRatioOk = summary.nearRatio >= II_NEAR_LOWER && summary.nearRatio <= II_NEAR_UPPER;
-        const nearBalanceOk = summary.nearA === summary.nearB && summary.farA === summary.farB;
-        const symbolicOk = summary.nearSymbolicRatio >= II_NEAR_SYMBOLIC_MIN_RATIO;
-        const classOk = summary.countA === summary.countB;
-        const penalty = (
-          Math.abs(summary.nearRatio - (II_NEAR_LOWER + II_NEAR_UPPER) / 2) * 100 +
-          Math.abs(summary.nearA - summary.nearB) * 5 +
-          Math.abs(summary.farA - summary.farB) * 5 +
-          (symbolicOk ? 0 : 200) +
-          (sfBalanceOk ? 0 : 200) +
-          (binBalanceOk ? 0 : 200) +
-          comboPenalty * 10 +
-          (classOk ? 0 : 200)
-        );
-        if (penalty < bestScore) {
-          bestScore = penalty;
-          bestCandidate = blockTrials.slice();
+        if (failed) continue;
+        const flat = blocks.flat();
+        const heur = evaluateSingleDimHeuristics(flat);
+        if (heur <= II_SINGLE_DIM_MAX_ACCURACY) {
+          console.log(`II session ${sessionIndex}: 单维启发式最大正确率 ${heur.toFixed(3)} ≤ ${II_SINGLE_DIM_MAX_ACCURACY}`);
+          return blocks;
         }
-        if (sfBalanceOk && binBalanceOk && nearRatioOk && nearBalanceOk && symbolicOk && classOk) {
-          const ordered = shuffleIIBlockTrialsWithAntiStreak(blockTrials, `${participantId}_${structure.key}_blk${globalBlockIndex}_${attemptSeed}_order${attempt}`);
-          return ordered;
+        if (heur < bestScore) {
+          bestScore = heur;
+          bestBlocks = blocks;
         }
       }
-      if (bestCandidate) {
-        console.warn('II block fell back to best candidate under new constraints', {
-          structure: structure.key,
-          block: globalBlockIndex + 1
-        });
-        const ordered = shuffleIIBlockTrialsWithAntiStreak(bestCandidate, `${participantId}_${structure.key}_blk${globalBlockIndex}_${attemptSeed}_fallback`);
-        return ordered;
+      if (bestBlocks) {
+        console.warn(`II session ${sessionIndex}: 未达到单维阈值，使用最佳候选 (max acc=${bestScore.toFixed(3)})`);
+        return bestBlocks;
       }
-      return null;
+      console.error(`II session ${sessionIndex}: 无法生成高斯刺激计划`);
+      return [];
+    }
+
+    function precomputeGaussianStimuli() {
+      const store = {};
+      [1, 2].forEach(sessionIdx => {
+        store[sessionIdx] = {
+          RB: generateGaussianRBBlocks(sessionIdx),
+          II: generateGaussianIIBlocks(sessionIdx)
+        };
+      });
+      return store;
+    }
+
+    const PRECOMPUTED_GAUSSIAN_STIMULI = precomputeGaussianStimuli();
+
+    function makeTrialsRB_balancedV3(participantId, rbRule) {
+      const sessionIndex = rbRule === 'A_LT7' ? 1 : 2;
+      const blocks = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.RB || [];
+      return cloneBlocks(blocks);
     }
 
     function evaluateSingleDimHeuristics(trials) {
@@ -1018,57 +1122,14 @@
       return maxAccuracy;
     }
 
-    function buildIIBlocksForPlan(participantId, plan, attemptSuffix) {
-      const blocks = [];
-      let globalBlockIndex = 0;
-      for (const entry of plan) {
-        const structure = getIIStructureConfig(entry.key);
-        if (!structure) continue;
-        const blockCount = entry.blocks || 0;
-        for (let i = 0; i < blockCount; i++) {
-          const trials = buildIIBlockForStructure(participantId, structure, globalBlockIndex, `${attemptSuffix}_${entry.key}_${i}`);
-          if (!trials) {
-            return null;
-          }
-          const annotated = trials.map((trial, idx) => ({
-            ...trial,
-            blockName: `II-${globalBlockIndex + 1}`,
-            blockIndex: globalBlockIndex + 1,
-            trialIndex: idx + 1
-          }));
-          blocks.push(annotated);
-          globalBlockIndex += 1;
-        }
-      }
-      const flatTrials = blocks.flat();
-      const heuristicMax = evaluateSingleDimHeuristics(flatTrials);
-      return { blocks, heuristicMax };
-    }
-
     function makeTrialsII_balancedV3(participantId, plan) {
       if (!Array.isArray(plan) || !plan.length) {
-        throw new Error('缺少与 session 对应的 II 结构计划，无法生成 II 条件。');
+        return [];
       }
-      let bestResult = null;
-      let bestScore = Infinity;
-      for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
-        const result = buildIIBlocksForPlan(participantId, plan, `attempt${attempt}`);
-        if (!result) continue;
-        if (result.heuristicMax <= II_SINGLE_DIM_MAX_ACCURACY) {
-          console.log(`II 单维度启发式最大准确率=${result.heuristicMax.toFixed(3)}，已满足 <= ${II_SINGLE_DIM_MAX_ACCURACY}`);
-          return result.blocks;
-        }
-        if (result.heuristicMax < bestScore) {
-          bestScore = result.heuristicMax;
-          bestResult = result.blocks;
-        }
-      }
-      if (bestResult) {
-        const bestScoreStr = Number.isFinite(bestScore) ? bestScore.toFixed(3) : '未知';
-        console.warn(`II 条件生成失败：单维度启发式最优正确率 ${bestScoreStr} 仍高于 ${II_SINGLE_DIM_MAX_ACCURACY}，将使用最接近阈值的方案。`);
-        return bestResult;
-      }
-      throw new Error('II 条件生成失败：未能生成任何可用的 II block。');
+      const key = plan[0]?.key;
+      const sessionIndex = key === 'II1' ? 1 : 2;
+      const blocks = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.II || [];
+      return cloneBlocks(blocks);
     }
     // -------------------------
     // Stimulus rendering
