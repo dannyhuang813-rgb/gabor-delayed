@@ -218,7 +218,7 @@
       2: [{ key: 'II2', blocks: 5 }]
     };
 
-    const II_SINGLE_DIM_MAX_ACCURACY = 0.60;
+    const II_SINGLE_DIM_MAX_ACCURACY = 0.58;
 
     const DELAYED_STAGE_MS = 2000;
 
@@ -446,6 +446,32 @@
       summary.nearRatio = summary.total ? summary.nearCount / summary.total : 0;
       summary.nearSymbolicRatio = summary.nearCount ? summary.nearSymbolic / summary.nearCount : 0;
       return summary;
+    }
+
+    function checkSfBinLabelBalance(trials) {
+      const comboMap = new Map();
+      trials.forEach(trial => {
+        const binKey = trial.binKey || determineBinKey(trial.ori);
+        const key = `${trial.sf}_${binKey}`;
+        if (!comboMap.has(key)) {
+          comboMap.set(key, { total: 0, countA: 0, countB: 0 });
+        }
+        const stats = comboMap.get(key);
+        stats.total += 1;
+        if (trial.label === 'A') stats.countA += 1; else stats.countB += 1;
+      });
+      for (const sf of SF_LINES) {
+        for (const binKey of II_BIN_KEYS) {
+          const stats = comboMap.get(`${sf}_${binKey}`);
+          if (!stats || stats.total === 0) {
+            return false;
+          }
+          if (stats.countA !== stats.countB) {
+            return false;
+          }
+        }
+      }
+      return true;
     }
 
     // -------------------------
@@ -792,12 +818,13 @@
         const summary = summarizeIIBlock(blockTrials);
         const sfBalanceOk = SF_LINES.every(sf => {
           const subset = blockTrials.filter(t => t.sf === sf);
-          return subset.filter(t => t.label === 'A').length === subset.length / 2;
+          return subset.length > 0 && subset.filter(t => t.label === 'A').length === subset.length / 2;
         });
         const binBalanceOk = II_BIN_KEYS.every(binKey => {
           const subset = blockTrials.filter(t => t.binKey === binKey);
-          return subset.filter(t => t.label === 'A').length === subset.length / 2;
+          return subset.length > 0 && subset.filter(t => t.label === 'A').length === subset.length / 2;
         });
+        const comboBalanceOk = checkSfBinLabelBalance(blockTrials);
         const nearRatioOk = summary.nearRatio >= II_NEAR_LOWER && summary.nearRatio <= II_NEAR_UPPER;
         const nearBalanceOk = summary.nearA === summary.nearB && summary.farA === summary.farB;
         const symbolicOk = summary.nearSymbolicRatio >= II_NEAR_SYMBOLIC_MIN_RATIO;
@@ -809,13 +836,14 @@
           (symbolicOk ? 0 : 200) +
           (sfBalanceOk ? 0 : 200) +
           (binBalanceOk ? 0 : 200) +
+          (comboBalanceOk ? 0 : 300) +
           (classOk ? 0 : 200)
         );
         if (penalty < bestScore) {
           bestScore = penalty;
           bestCandidate = blockTrials.slice();
         }
-        if (sfBalanceOk && binBalanceOk && nearRatioOk && nearBalanceOk && symbolicOk && classOk) {
+        if (sfBalanceOk && binBalanceOk && comboBalanceOk && nearRatioOk && nearBalanceOk && symbolicOk && classOk) {
           const ordered = shuffleIIBlockTrialsWithAntiStreak(blockTrials, `${participantId}_${structure.key}_blk${globalBlockIndex}_${attemptSeed}_order${attempt}`);
           return ordered;
         }
