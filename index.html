@@ -185,10 +185,11 @@
     const RESP_LIMIT_MS = 3000;
     const FEEDBACK_MS   = 500;
 
-    // 固定物理范围：所有被试共用 sf=3~8、ori=±30°，便于与 Maddox/Ashby 范式保持一致
-    const FIXED_SF_RANGE = { min: 3, max: 8 };
-    const FIXED_ORI_RANGE = { min: -30, max: 30 };
-    const FIXED_SF_LEVELS = [3, 4, 5, 6, 7, 8];
+    // 固定物理范围：所有被试共用 sf=3~10、ori=±80°，便于匹配 Maddox/Roark 图示的 II 高斯结构
+    // 参照 Roark 等人图示的 II 分布，将 sf 扩展至 3~10 左右、ori 扩展至 ±80°，以便得到清晰的对角线高斯团块
+    const FIXED_SF_RANGE = { min: 3, max: 10 };
+    const FIXED_ORI_RANGE = { min: -80, max: 80 };
+    const FIXED_SF_LEVELS = [3, 4, 5, 6, 7, 8, 9, 10];
 
     let activeSfRange = { ...FIXED_SF_RANGE };
     let activeOriRange = { ...FIXED_ORI_RANGE };
@@ -196,7 +197,7 @@
 
     const ORI_JITTER = 0.5;
 
-    let rbOriThresholdDeg = 15;
+    let rbOriThresholdDeg = 40;
 
     let dynamicBinRanges = null;
 
@@ -299,18 +300,18 @@
     // 二维高斯参数：定义在标准化潜在空间 (x=sf, y=ori)，取值约 [-2,2]
     // RB：两类在单一维度（ori 偏离量）方向上分离，另一维完全重叠 → 纯一维规则
     const RB_GAUSS_PARAMS = {
-      // Session 1：|ori| 越小越可能是 A，阈值由 rbOriThresholdDeg≈15° 控制
+      // Session 1：|ori| 越小越可能是 A，阈值约为 ±40°，高斯仅在 y 轴方向分离
       1: {
         classes: {
-          A: { mean: [0, -0.5], cov: [[0.30, 0], [0, 0.20]] },
-          B: { mean: [0, 0.8], cov: [[0.30, 0], [0, 0.20]] }
+          A: { mean: [0, -0.8], cov: [[0.35, 0], [0, 0.25]] },
+          B: { mean: [0, 1.0], cov: [[0.35, 0], [0, 0.25]] }
         }
       },
-      // Session 2：同样是 |ori| 规则，但标签翻转 → |ori| 小的判为 B
+      // Session 2：沿同一 |ori| 规则，但标签翻转（|ori| 小 → B）
       2: {
         classes: {
-          A: { mean: [0, 0.8], cov: [[0.30, 0], [0, 0.20]] },
-          B: { mean: [0, -0.5], cov: [[0.30, 0], [0, 0.20]] }
+          A: { mean: [0, 1.0], cov: [[0.35, 0], [0, 0.25]] },
+          B: { mean: [0, -0.8], cov: [[0.35, 0], [0, 0.25]] }
         }
       }
     };
@@ -318,16 +319,18 @@
     const II_GAUSS_PARAMS = {
       1: {
         structureKey: 'II1',
+        // 低 sf × 高 |ori| vs 高 sf × 低 |ori|，形成与图示类似的正斜率高斯团块
         classes: {
-          A: { mean: [-0.9, 0.25], cov: [[0.50, 0.15], [0.15, 0.40]] },
-          B: { mean: [0.9, -0.25], cov: [[0.50, 0.15], [0.15, 0.40]] }
+          A: { mean: [-1.1, 1.1], cov: [[0.55, 0.32], [0.32, 0.65]] },
+          B: { mean: [1.1, 0.0], cov: [[0.55, 0.32], [0.32, 0.65]] }
         }
       },
       2: {
         structureKey: 'II2',
+        // 镜像结构：低 sf × 低 |ori| vs 高 sf × 高 |ori|，但通过负相关协方差形成另一条斜线
         classes: {
-          A: { mean: [-0.9, -0.25], cov: [[0.50, -0.15], [-0.15, 0.40]] },
-          B: { mean: [0.9, 0.25], cov: [[0.50, -0.15], [-0.15, 0.40]] }
+          A: { mean: [-1.1, -0.1], cov: [[0.55, -0.32], [-0.32, 0.65]] },
+          B: { mean: [1.1, -1.1], cov: [[0.55, -0.32], [-0.32, 0.65]] }
         }
       }
     };
@@ -813,9 +816,9 @@
       return null;
     }
 
-    const ORI_MAG_MIN = 3;
+    const ORI_MAG_MIN = 5;
 
-    // x in normal space → 线性映射到 [3,8] → 量化为 {3,4,5,6,7,8}
+    // x in normal space → 线性映射到 [3,10] → 量化为 {3,4,5,6,7,8,9,10}
     function mapLatentToPhysicalSf(latentX) {
       return clamp(
         linearMap(latentX, LATENT_RANGE.xMin, LATENT_RANGE.xMax, activeSfRange.min, activeSfRange.max),
@@ -824,7 +827,7 @@
       );
     }
 
-    // y in normal space → |ori| ∈ [3°, 30°]，方向符号稍后随机决定
+    // y in normal space → |ori| ∈ [5°, 80°]，方向符号稍后随机决定
     function mapLatentToPhysicalOriMagnitude(latentY) {
       const absLatent = Math.abs(latentY);
       return clamp(
