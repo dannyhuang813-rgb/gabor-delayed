@@ -207,10 +207,10 @@
     };
 
     const II_STRUCTURES_LIBRARY = {
-      // Session 1：两维对称标准化，保持 0.5/0.5 的权重搭配
-      II1: { key: 'II1', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.02, oriSign: 1 },
-      // Session 2：沿 ori 轴镜像并平移截距，保持与 Session 1 相同的 0.5/0.5 权重
-      II2: { key: 'II2', weights: { wsf: 0.5, wori: 0.5 }, bias: -0.02, oriSign: -1 }
+      // Session 1：保持接近 0.5/0.5 的对称权重，但略微增强 ori 维度以保证 sf 内部也能出现 A/B
+      II1: { key: 'II1', weights: { wsf: 0.45, wori: 0.55 }, bias: 0.0, oriSign: 1 },
+      // Session 2：沿 ori 轴镜像并加上轻微偏置，仍保持等价的 0.45/0.55 权重结构
+      II2: { key: 'II2', weights: { wsf: 0.45, wori: 0.55 }, bias: 0.05, oriSign: -1 }
     };
 
     const II_STRUCTURE_PLANS = {
@@ -447,40 +447,66 @@
       return summary;
     }
 
-    function checkSfBinLabelBalance(trials, structure) {
+    function evaluateSfBinBalance(trials, structure) {
+      const sfStats = new Map();
+      const binStats = new Map();
       const comboMap = new Map();
       trials.forEach(trial => {
         const binKey = trial.binKey || determineBinKey(trial.ori);
-        const key = `${trial.sf}_${binKey}`;
-        if (!comboMap.has(key)) {
-          comboMap.set(key, { total: 0, countA: 0, countB: 0 });
+        if (!sfStats.has(trial.sf)) {
+          sfStats.set(trial.sf, { A: 0, B: 0 });
         }
-        const stats = comboMap.get(key);
-        stats.total += 1;
-        if (trial.label === 'A') stats.countA += 1; else stats.countB += 1;
+        if (!binStats.has(binKey)) {
+          binStats.set(binKey, { A: 0, B: 0 });
+        }
+        const sfEntry = sfStats.get(trial.sf);
+        const binEntry = binStats.get(binKey);
+        sfEntry[trial.label] += 1;
+        binEntry[trial.label] += 1;
+        const comboKey = `${trial.sf}_${binKey}`;
+        if (!comboMap.has(comboKey)) {
+          comboMap.set(comboKey, { total: 0, countA: 0, countB: 0 });
+        }
+        const comboEntry = comboMap.get(comboKey);
+        comboEntry.total += 1;
+        comboEntry[`count${trial.label}`] += 1;
       });
-      let maxDiff = 0;
-      let ok = true;
+      const sfOk = SF_LINES.every(sf => {
+        const stats = sfStats.get(sf);
+        return stats && stats.A === stats.B;
+      });
+      const binOk = II_BIN_KEYS.every(binKey => {
+        const stats = binStats.get(binKey);
+        return stats && stats.A === stats.B;
+      });
+      let comboPenalty = 0;
+      let comboMaxDiff = 0;
       for (const sf of SF_LINES) {
         for (const binKey of II_BIN_KEYS) {
-          const key = `${sf}_${binKey}`;
-          const stats = comboMap.get(key) || { total: 0, countA: 0, countB: 0 };
+          const stats = comboMap.get(`${sf}_${binKey}`) || { total: 0, countA: 0, countB: 0 };
           const feasibleA = structure ? isLabelFeasible(structure, sf, binKey, 'A') : true;
           const feasibleB = structure ? isLabelFeasible(structure, sf, binKey, 'B') : true;
           if (feasibleA && feasibleB) {
             const diff = Math.abs(stats.countA - stats.countB);
-            if (diff > 0 || stats.total === 0) ok = false;
-            if (diff > maxDiff) maxDiff = diff;
-          } else if (feasibleA && !feasibleB) {
-            if (stats.countB > 0) ok = false;
-          } else if (!feasibleA && feasibleB) {
-            if (stats.countA > 0) ok = false;
-          } else if (stats.total > 0) {
-            ok = false;
+            if (stats.total === 0) {
+              comboPenalty += 4;
+            } else {
+              comboPenalty += diff;
+            }
+            if (diff > comboMaxDiff) comboMaxDiff = diff;
+          } else if (!feasibleA && !feasibleB) {
+            if (stats.total > 0) {
+              comboPenalty += stats.total * 2;
+            }
+          } else {
+            const impossibleCount = feasibleA ? stats.countB : stats.countA;
+            if (impossibleCount > 0) {
+              comboPenalty += impossibleCount * 10;
+            }
           }
         }
       }
-      return { ok, imbalance: maxDiff };
+      return { sfOk, binOk, comboPenalty, comboMaxDiff };
     }
 
     function isLabelFeasible(structure, sf, binKey, targetLabel) {
@@ -921,9 +947,8 @@
           const subset = blockTrials.filter(t => t.binKey === binKey);
           return subset.length > 0 && subset.filter(t => t.label === 'A').length === subset.length / 2;
         });
-        const comboCheck = checkSfBinLabelBalance(blockTrials, structure);
-        const comboBalanceOk = comboCheck.ok;
-        const comboImbalance = comboCheck.imbalance;
+        const comboCheck = evaluateSfBinBalance(blockTrials, structure);
+        const comboPenalty = comboCheck.comboPenalty;
         const nearRatioOk = summary.nearRatio >= II_NEAR_LOWER && summary.nearRatio <= II_NEAR_UPPER;
         const nearBalanceOk = summary.nearA === summary.nearB && summary.farA === summary.farB;
         const symbolicOk = summary.nearSymbolicRatio >= II_NEAR_SYMBOLIC_MIN_RATIO;
@@ -935,14 +960,14 @@
           (symbolicOk ? 0 : 200) +
           (sfBalanceOk ? 0 : 200) +
           (binBalanceOk ? 0 : 200) +
-          comboImbalance * 20 +
+          comboPenalty * 10 +
           (classOk ? 0 : 200)
         );
         if (penalty < bestScore) {
           bestScore = penalty;
           bestCandidate = blockTrials.slice();
         }
-        if (sfBalanceOk && binBalanceOk && comboBalanceOk && nearRatioOk && nearBalanceOk && symbolicOk && classOk) {
+        if (sfBalanceOk && binBalanceOk && nearRatioOk && nearBalanceOk && symbolicOk && classOk) {
           const ordered = shuffleIIBlockTrialsWithAntiStreak(blockTrials, `${participantId}_${structure.key}_blk${globalBlockIndex}_${attemptSeed}_order${attempt}`);
           return ordered;
         }
