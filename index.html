@@ -1020,14 +1020,46 @@
       return null;
     }
 
+    function sampleIIStimulusMatching(sessionIndex, label, structure, targetSf, targetBin, desiredZone, rng) {
+      const config = II_GAUSS_PARAMS[sessionIndex];
+      if (!config) return null;
+      const classCfg = config.classes[label];
+      if (!classCfg) return null;
+      const maxAttempts = desiredZone === 'any' ? 5000 : 8000;
+      const strictLimit = desiredZone === 'any' ? 0 : Math.floor(maxAttempts * 0.6);
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const latent = sampleLatentPoint(classCfg, rng);
+        if (!latent) continue;
+        const stim = createStimulusFromLatent(latent);
+        if (stim.sf !== targetSf) continue;
+        const binKey = determineBinKey(stim.ori);
+        if (binKey !== targetBin) continue;
+        const projection = computeIIProjection(stim.sf, stim.ori, structure);
+        const dist = Math.abs(projection.raw) / (projection.norm || 1);
+        const nearFlag = dist <= 0.5 ? 1 : 0;
+        if (desiredZone === 'near' && attempt < strictLimit && !nearFlag) continue;
+        if (desiredZone === 'far' && attempt < strictLimit && nearFlag) continue;
+        const symbolicFlag = (Math.sign(projection.x) !== 0 && Math.sign(projection.x) === Math.sign(projection.y)) ? 1 : 0;
+        return {
+          sf: stim.sf,
+          ori: stim.ori,
+          binKey,
+          nearFlag,
+          symbolicFlag,
+          label,
+          iiStructure: structure.key,
+          correctKey: label === 'A' ? 'a' : 'b'
+        };
+      }
+      return null;
+    }
+
     function generateGaussianIIBlocks(sessionIndex) {
       const config = II_GAUSS_PARAMS[sessionIndex];
       if (!config) return [];
       const structure = getIIStructureConfig(config.structureKey);
       if (!structure) return [];
       const perLabelTotal = II_TRIALS_PER_BLOCK / 2;
-      const perLabelSf = perLabelTotal / SF_LINES.length;
-      const perLabelBin = perLabelTotal / II_BIN_KEYS.length;
       let bestBlocks = null;
       let bestScore = Infinity;
       for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
@@ -1035,54 +1067,71 @@
         const blocks = [];
         let failed = false;
         for (let blockIdx = 0; blockIdx < II_BLOCK_COUNT; blockIdx++) {
-          if (failed) break;
-          const blockTrials = [];
-          const labelCounts = { A: 0, B: 0 };
-          const sfCounts = { A: {}, B: {} };
-          const binCounts = { A: {}, B: {} };
-          SF_LINES.forEach(sf => {
-            sfCounts.A[sf] = 0;
-            sfCounts.B[sf] = 0;
-          });
-          II_BIN_KEYS.forEach(binKey => {
-            binCounts.A[binKey] = 0;
-            binCounts.B[binKey] = 0;
-          });
-          const nearCounts = { A: 0, B: 0 };
-          const farCounts = { A: 0, B: 0 };
-          const targetNear = Math.round(II_TRIALS_PER_BLOCK * (II_NEAR_LOWER + (II_NEAR_UPPER - II_NEAR_LOWER) * rng()));
+          const allocations = allocateIIComboCounts(structure, rng);
+          if (!allocations) {
+            failed = true;
+            break;
+          }
+          const minNear = Math.round(II_TRIALS_PER_BLOCK * II_NEAR_LOWER);
+          const maxNear = Math.round(II_TRIALS_PER_BLOCK * II_NEAR_UPPER);
+          let targetNear = Math.round(II_TRIALS_PER_BLOCK * (II_NEAR_LOWER + (II_NEAR_UPPER - II_NEAR_LOWER) * rng()));
+          targetNear = clamp(targetNear, minNear, maxNear);
+          if (targetNear % 2 === 1) {
+            targetNear += targetNear < maxNear ? 1 : -1;
+          }
+          let farTotal = II_TRIALS_PER_BLOCK - targetNear;
+          if (farTotal % 2 === 1) {
+            if (targetNear > minNear) {
+              targetNear -= 1;
+            } else if (targetNear < maxNear) {
+              targetNear += 1;
+            }
+            farTotal = II_TRIALS_PER_BLOCK - targetNear;
+          }
           const nearQuota = {
-            A: Math.floor(targetNear / 2),
-            B: targetNear - Math.floor(targetNear / 2)
+            A: targetNear / 2,
+            B: targetNear / 2
           };
           const farQuota = {
-            A: perLabelTotal - nearQuota.A,
-            B: perLabelTotal - nearQuota.B
+            A: farTotal / 2,
+            B: farTotal / 2
           };
-          let guard = 0;
-          const guardLimit = 120000;
-          while (blockTrials.length < II_TRIALS_PER_BLOCK && guard < guardLimit) {
-            guard += 1;
-            const label = labelCounts.A <= labelCounts.B ? 'A' : 'B';
-            const stim = sampleIIStimulusFromGaussian(sessionIndex, label, structure, rng);
-            if (!stim) {
-              failed = true;
-              break;
-            }
-            const sf = stim.sf;
-            const binKey = stim.binKey;
-            if (sfCounts[label][sf] >= perLabelSf) continue;
-            if (binCounts[label][binKey] >= perLabelBin) continue;
-            if (stim.nearFlag && nearCounts[label] >= nearQuota[label]) continue;
-            if (!stim.nearFlag && farCounts[label] >= farQuota[label]) continue;
-            blockTrials.push(stim);
-            labelCounts[label] += 1;
-            sfCounts[label][sf] += 1;
-            binCounts[label][binKey] += 1;
-            if (stim.nearFlag) {
-              nearCounts[label] += 1;
-            } else {
-              farCounts[label] += 1;
+          const nearCounts = { A: 0, B: 0 };
+          const farCounts = { A: 0, B: 0 };
+          const blockTrials = [];
+          for (const binKey of II_BIN_KEYS) {
+            if (failed) break;
+            for (const sf of SF_LINES) {
+              if (failed) break;
+              const cell = allocations[binKey]?.[sf];
+              if (!cell) continue;
+              for (const label of II_LABELS) {
+                const need = cell[label] || 0;
+                for (let rep = 0; rep < need; rep++) {
+                  const remainingNear = nearQuota[label] - nearCounts[label];
+                  const remainingFar = farQuota[label] - farCounts[label];
+                  let desiredZone = 'any';
+                  if (remainingNear > 0 && remainingFar > 0) {
+                    desiredZone = remainingNear >= remainingFar ? 'near' : 'far';
+                  } else if (remainingNear > 0) {
+                    desiredZone = 'near';
+                  } else if (remainingFar > 0) {
+                    desiredZone = 'far';
+                  }
+                  const stim = sampleIIStimulusMatching(sessionIndex, label, structure, sf, binKey, desiredZone, rng);
+                  if (!stim) {
+                    failed = true;
+                    break;
+                  }
+                  blockTrials.push(stim);
+                  if (stim.nearFlag) {
+                    nearCounts[label] += 1;
+                  } else {
+                    farCounts[label] += 1;
+                  }
+                }
+                if (failed) break;
+              }
             }
           }
           if (failed || blockTrials.length !== II_TRIALS_PER_BLOCK) {
