@@ -1049,6 +1049,7 @@
       if (!Array.isArray(plan) || !plan.length) {
         throw new Error('缺少与 session 对应的 II 结构计划，无法生成 II 条件。');
       }
+      let bestResult = null;
       let bestScore = Infinity;
       for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
         const result = buildIIBlocksForPlan(participantId, plan, `attempt${attempt}`);
@@ -1059,10 +1060,15 @@
         }
         if (result.heuristicMax < bestScore) {
           bestScore = result.heuristicMax;
+          bestResult = result.blocks;
         }
       }
-      const bestScoreStr = Number.isFinite(bestScore) ? bestScore.toFixed(3) : '未知';
-      throw new Error(`II 条件生成失败：单维度启发式最优正确率 ${bestScoreStr} 仍高于 ${II_SINGLE_DIM_MAX_ACCURACY}`);
+      if (bestResult) {
+        const bestScoreStr = Number.isFinite(bestScore) ? bestScore.toFixed(3) : '未知';
+        console.warn(`II 条件生成失败：单维度启发式最优正确率 ${bestScoreStr} 仍高于 ${II_SINGLE_DIM_MAX_ACCURACY}，将使用最接近阈值的方案。`);
+        return bestResult;
+      }
+      throw new Error('II 条件生成失败：未能生成任何可用的 II block。');
     }
     // -------------------------
     // Stimulus rendering
