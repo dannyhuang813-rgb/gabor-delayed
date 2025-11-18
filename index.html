@@ -595,7 +595,7 @@
         return { x: 0, y: 0, raw: 0, norm: 1 };
       }
       const x = mapPhysicalSfToLatent(sfLines);
-      const y = mapPhysicalOriToLatent(oriDeg);
+      const y = mapPhysicalOriToLatent(Math.abs(oriDeg));
       const raw = boundary.w1 * x + boundary.w2 * y + boundary.c;
       return { x, y, raw, norm: boundary.norm };
     }
@@ -603,7 +603,7 @@
     function labelII(sfLines, oriDeg, structure) {
       const boundary = structure?.boundary;
       const x = mapPhysicalSfToLatent(sfLines);
-      const y = mapPhysicalOriToLatent(oriDeg);
+      const y = mapPhysicalOriToLatent(Math.abs(oriDeg));
       return bayesDecision(x, y, boundary);
     }
 
@@ -916,33 +916,89 @@
       return blocks;
     }
 
-    function sampleIICandidate(sessionIndex, structure, rng) {
-      const config = II_GAUSS_PARAMS[sessionIndex];
-      if (!config) return null;
-      const classKeys = Object.keys(config.classes);
-      if (!classKeys.length) return null;
-      const picked = classKeys[Math.floor(rng() * classKeys.length)];
-      const classCfg = config.classes[picked];
-      const latent = sampleLatentPoint(classCfg, rng);
-      if (!latent) return null;
-      const stim = createStimulusFromLatent(latent);
-      const binKey = determineBinKey(stim.ori);
-      if (!binKey) return null;
-      const label = labelII(stim.sf, stim.ori, structure);
-      const projection = computeIIProjection(stim.sf, stim.ori, structure);
-      const dist = Math.abs(projection.raw) / (projection.norm || 1);
-      const nearFlag = dist <= 0.5 ? 1 : 0;
-      const symbolicFlag = (Math.sign(projection.x) !== 0 && Math.sign(projection.x) === Math.sign(projection.y)) ? 1 : 0;
-      return {
-        sf: stim.sf,
-        ori: stim.ori,
-        binKey,
-        nearFlag,
-        symbolicFlag,
-        label,
-        iiStructure: structure.key,
-        correctKey: label === 'A' ? 'a' : 'b'
-      };
+    function buildSfLayerPool(sfValue, targetPerLabel, structure, rng) {
+      const absOriMax = Math.abs(activeOriRange.max);
+      const pools = { A: [], B: [] };
+      const counts = { A: 0, B: 0 };
+      const trials = [];
+      const guardLimit = targetPerLabel * 2000;
+      let guard = 0;
+      while ((counts.A < targetPerLabel || counts.B < targetPerLabel) && guard < guardLimit) {
+        guard += 1;
+        const absOri = Number((rng() * absOriMax).toFixed(3));
+        const projection = computeIIProjection(sfValue, absOri, structure);
+        const label = projection.raw >= 0 ? 'A' : 'B';
+        if (counts[label] >= targetPerLabel) continue;
+        const entry = {
+          sf: sfValue,
+          oriAbs: absOri,
+          label,
+          iiStructure: structure.key
+        };
+        pools[label].push(entry);
+        trials.push(entry);
+        counts[label] += 1;
+      }
+      ['A', 'B'].forEach(label => {
+        if (counts[label] >= targetPerLabel) return;
+        const pool = pools[label];
+        if (!pool.length) return;
+        while (counts[label] < targetPerLabel) {
+          const template = pool[Math.floor(rng() * pool.length)];
+          const clone = { ...template };
+          trials.push(clone);
+          pools[label].push(clone);
+          counts[label] += 1;
+        }
+      });
+      const complete = counts.A >= targetPerLabel && counts.B >= targetPerLabel;
+      return { trials: complete ? trials : [], complete };
+    }
+
+    function finalizeSfLayerTrials(trials, structure, rng) {
+      if (!trials.length) return [];
+      const total = trials.length;
+      const signs = new Array(total).fill(1);
+      const negatives = Math.floor(total / 2);
+      for (let i = 0; i < negatives; i++) {
+        signs[i] = -1;
+      }
+      shuffleInPlace(signs, rng);
+      return trials.map((trial, idx) => {
+        const signedOri = clamp(trial.oriAbs * signs[idx], activeOriRange.min, activeOriRange.max);
+        const finalOri = Number(signedOri.toFixed(3));
+        const projection = computeIIProjection(trial.sf, finalOri, structure);
+        const dist = Math.abs(projection.raw) / (projection.norm || 1);
+        return {
+          sf: trial.sf,
+          ori: finalOri,
+          binKey: determineBinKey(finalOri),
+          nearFlag: dist <= 0.5 ? 1 : 0,
+          symbolicFlag: (Math.sign(projection.x) !== 0 && Math.sign(projection.x) === Math.sign(projection.y)) ? 1 : 0,
+          iiStructure: structure.key,
+          label: trial.label,
+          correctKey: trial.label === 'A' ? 'a' : 'b'
+        };
+      });
+    }
+
+    function interleaveSfLayers(sfLevels, layerMap) {
+      const iterators = sfLevels.map(sf => ({ sf, list: layerMap.get(sf) || [], index: 0 }));
+      const total = iterators.reduce((sum, item) => sum + item.list.length, 0);
+      const merged = [];
+      while (merged.length < total) {
+        let advanced = false;
+        for (const item of iterators) {
+          if (item.index < item.list.length) {
+            merged.push({ ...item.list[item.index] });
+            item.index += 1;
+            advanced = true;
+            if (merged.length === total) break;
+          }
+        }
+        if (!advanced) break;
+      }
+      return merged;
     }
 
     function generateGaussianIIBlocks(sessionIndex) {
@@ -951,124 +1007,90 @@
       const structure = getIIStructureConfig(config.structureKey);
       if (!structure) return { blocks: [], heuristic: 1, passed: false };
       const sfLevels = getActiveSfLevels();
-      const signKeys = ['pos', 'neg'];
-      const perLabel = II_TRIALS_PER_BLOCK / 2;
-      const targetPerSf = perLabel / sfLevels.length;
-      const targetPerBin = perLabel / II_BIN_KEYS.length;
-      const targetPerSign = perLabel / signKeys.length;
-      const zeroMap = keys => Object.fromEntries(keys.map(key => [key, 0]));
+      const perSfTotal = Math.round(N_II / sfLevels.length);
+      const perSfLabel = perSfTotal / 2;
       let bestBlocks = null;
-      let bestScore = Infinity;
       let bestHeuristic = Infinity;
       let bestRule = '';
-      let bestOriAcc = Infinity;
-      let bestSfAcc = Infinity;
-      let bestOriRule = '';
-      let bestSfRule = '';
       const failureReasons = new Set();
       for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
-        const rng = hashString(`GAUSS_II_SESSION${sessionIndex}_attempt${attempt}`);
-        const blocks = [];
-        let planPenalty = 0;
+        const layerMap = new Map();
         let failed = false;
-        for (let blockIdx = 0; blockIdx < II_BLOCK_COUNT; blockIdx++) {
-          const blockTrials = [];
-          const counts = {
-            totals: { A: 0, B: 0 },
-            sf: { A: zeroMap(sfLevels), B: zeroMap(sfLevels) },
-            bin: { A: zeroMap(II_BIN_KEYS), B: zeroMap(II_BIN_KEYS) },
-            sign: { A: zeroMap(signKeys), B: zeroMap(signKeys) }
-          };
-          let relax = 0;
-          let guard = 0;
-          while (blockTrials.length < II_TRIALS_PER_BLOCK && relax <= 3) {
-            if (guard >= II_TRIALS_PER_BLOCK * 1200) {
-              relax += 1;
-              guard = 0;
-              continue;
-            }
-            guard += 1;
-            const stim = sampleIICandidate(sessionIndex, structure, rng);
-            if (!stim) continue;
-            const label = stim.label;
-            const signKey = stim.ori >= 0 ? 'pos' : 'neg';
-            const limitsMet =
-              counts.totals[label] < perLabel + relax &&
-              counts.sf[label][stim.sf] < targetPerSf + relax &&
-              counts.bin[label][stim.binKey] < targetPerBin + relax &&
-              counts.sign[label][signKey] < targetPerSign + relax;
-            if (!limitsMet) continue;
-            counts.totals[label] += 1;
-            counts.sf[label][stim.sf] += 1;
-            counts.bin[label][stim.binKey] += 1;
-            counts.sign[label][signKey] += 1;
-            blockTrials.push({ ...stim });
-          }
-          if (blockTrials.length !== II_TRIALS_PER_BLOCK) {
+        for (const sf of sfLevels) {
+          const layerSeed = `GAUSS_II_SESSION${sessionIndex}_sf${sf}_attempt${attempt}`;
+          const poolResult = buildSfLayerPool(sf, perSfLabel, structure, hashString(layerSeed));
+          if (!poolResult.complete || poolResult.trials.length < perSfTotal) {
+            failureReasons.add(`sf${sf}`);
             failed = true;
             break;
           }
-          sfLevels.forEach(sf => {
-            planPenalty += Math.abs(counts.sf.A[sf] - targetPerSf) + Math.abs(counts.sf.B[sf] - targetPerSf);
-          });
-          II_BIN_KEYS.forEach(binKey => {
-            planPenalty += Math.abs(counts.bin.A[binKey] - targetPerBin) + Math.abs(counts.bin.B[binKey] - targetPerBin);
-          });
-          signKeys.forEach(sign => {
-            planPenalty += Math.abs(counts.sign.A[sign] - targetPerSign) + Math.abs(counts.sign.B[sign] - targetPerSign);
-          });
+          const finalized = finalizeSfLayerTrials(
+            poolResult.trials.slice(0, perSfTotal),
+            structure,
+            hashString(`${layerSeed}_signs`)
+          );
+          if (finalized.length !== perSfTotal) {
+            failureReasons.add(`sf${sf}`);
+            failed = true;
+            break;
+          }
+          layerMap.set(sf, finalized);
+        }
+        if (failed) continue;
+        const merged = interleaveSfLayers(sfLevels, layerMap);
+        if (merged.length !== N_II) {
+          failureReasons.add('interleave');
+          continue;
+        }
+        const blocks = [];
+        for (let blockIdx = 0; blockIdx < II_BLOCK_COUNT; blockIdx++) {
+          const slice = merged.slice(blockIdx * II_TRIALS_PER_BLOCK, (blockIdx + 1) * II_TRIALS_PER_BLOCK);
+          if (slice.length !== II_TRIALS_PER_BLOCK) {
+            failed = true;
+            break;
+          }
+          const annotated = slice.map((trial, idx) => ({
+            ...trial,
+            blockName: `II-${blockIdx + 1}`,
+            blockIndex: blockIdx + 1,
+            trialIndex: idx + 1
+          }));
           const ordered = shuffleIIBlockTrialsWithAntiStreak(
-            blockTrials,
+            annotated,
             `GAUSS_II_SESSION${sessionIndex}_block${blockIdx}_attempt${attempt}`
           );
-          ordered.forEach((trial, idx) => {
-            trial.blockName = `II-${blocks.length + 1}`;
-            trial.blockIndex = blocks.length + 1;
-            trial.trialIndex = idx + 1;
-          });
           blocks.push(ordered);
         }
         if (failed) {
-          failureReasons.add('sampling');
+          failureReasons.add('block');
           continue;
         }
         const flat = blocks.flat();
         const heurResult = evaluateSingleDimHeuristics(flat);
-        const heur = (Number.isFinite(heurResult.singleAccuracy) && heurResult.singleAccuracy > 0)
-          ? heurResult.singleAccuracy
-          : Math.max(heurResult.sfAccuracy, heurResult.oriAccuracy, heurResult.accuracy || 0);
-        const passesAll = heur <= II_SINGLE_DIM_MAX_ACCURACY;
-        const score = heur * 100 + planPenalty;
-        if (passesAll) {
+        const heur = Math.max(heurResult.sfAccuracy, heurResult.oriAccuracy);
+        if (heur <= II_SINGLE_DIM_MAX_ACCURACY) {
           console.log(
             `II session ${sessionIndex}: 单维≤${II_SINGLE_DIM_MAX_ACCURACY} (${heur.toFixed(3)} via ${heurResult.rule || heurResult.oriRule || heurResult.sfRule})`
           );
-          return { blocks, heuristic: heur, bestRule: heurResult.rule, passed: true };
+          return { blocks, heuristic: heur, bestRule: heurResult.rule || heurResult.oriRule || heurResult.sfRule, passed: true };
         }
         failureReasons.add('heuristics');
-        if (score < bestScore) {
-          bestScore = score;
-          bestBlocks = blocks;
+        if (heur < bestHeuristic) {
           bestHeuristic = heur;
-          bestRule = heurResult.rule;
-          bestOriAcc = heurResult.oriAccuracy;
-          bestSfAcc = heurResult.sfAccuracy;
-          bestOriRule = heurResult.oriRule;
-          bestSfRule = heurResult.sfRule;
+          bestBlocks = blocks;
+          bestRule = heurResult.rule || heurResult.oriRule || heurResult.sfRule || '';
         }
       }
       if (bestBlocks) {
-        const oriDisplay = Number.isFinite(bestOriAcc) ? bestOriAcc : 0;
-        const sfDisplay = Number.isFinite(bestSfAcc) ? bestSfAcc : 0;
         console.warn(
-          `II session ${sessionIndex}: 未满足单维≤${II_SINGLE_DIM_MAX_ACCURACY} 的要求，使用最佳候选 (overall=${bestHeuristic.toFixed(3)}, ori=${oriDisplay.toFixed(3)} via ${bestOriRule || 'N/A'}, sf=${sfDisplay.toFixed(3)} via ${bestSfRule || 'N/A'})。建议：调整 II_GAUSS_PARAMS 或扩大 PHYSICAL_RANGE_BOUNDS 以获取更低的单维可分性。`
+          `II session ${sessionIndex}: 未满足单维≤${II_SINGLE_DIM_MAX_ACCURACY} 的要求，使用最佳候选 (overall=${bestHeuristic.toFixed(3)} via ${bestRule || 'N/A'})。建议：按照提示调整 II_GAUSS_PARAMS 或扩大物理范围以降低单维启发式准确率。`
         );
         const passedFallback = (bestHeuristic ?? 1) <= II_SINGLE_DIM_MAX_ACCURACY;
         return { blocks: bestBlocks, heuristic: bestHeuristic, bestRule, passed: passedFallback };
       }
       const reasonList = Array.from(failureReasons).length ? Array.from(failureReasons).join(',') : '未知原因';
       console.error(
-        `II session ${sessionIndex}: 无法生成高斯刺激计划（原因：${reasonList}）。请尝试调整 II_GAUSS_PARAMS 或阈值设定。`
+        `II session ${sessionIndex}: 无法生成高斯刺激计划（原因：${reasonList}）。请检查 II_GAUSS_PARAMS、物理范围或单维阈值设置。`
       );
       return { blocks: [], heuristic: 1, bestRule: '', passed: false };
     }
