@@ -187,6 +187,9 @@
 
     const ORI_JITTER = 0.5;
 
+    const RB_ORI_THRESHOLD_DEG = 7;
+    const RB_SF_THRESHOLD = 4.5; // sf>=4.5(≈5/6) → A when RB rule relies on density
+
     const ORDER_CODE_PLANS = {
       '1': {
         session1: { movement: 'Seated', taskOrder: ['RB', 'II'] },
@@ -225,14 +228,6 @@
     const II_NEAR_UPPER = 0.60; // acceptable range: [45%, 60%]
     const II_NEAR_SYMBOLIC_MIN_RATIO = 0.60; // 至少 60% 近样本为“符号型”（x 与 y 同号）
 
-    const RB_BIN_PLAN = [
-      { bin1: 14, bin2: 12, bin3: 14 },
-      { bin1: 12, bin2: 14, bin3: 14 },
-      { bin1: 14, bin2: 14, bin3: 12 },
-      { bin1: 14, bin2: 12, bin3: 14 },
-      { bin1: 12, bin2: 14, bin3: 14 }
-    ];
-
     const II_BIN_KEYS = ['b1', 'b2', 'b3'];
     const II_BIN_RANGES = {
       b1: { min: 1, max: 5 },
@@ -256,12 +251,14 @@
     // 二维高斯参数：定义在标准化潜在空间 (x=sf, y=ori)，取值约 [-2,2]
     // RB：两类在单一维度（Session1: y，Session2: x）方向上分离，另一维完全重叠 → 纯一维规则
     const RB_GAUSS_PARAMS = {
+      // Session 1：仅 y（ori magnitude）决定类别，x 维完全重叠
       1: {
         classes: {
-          A: { mean: [0, -0.9], cov: [[0.25, 0], [0, 0.16]] },
-          B: { mean: [0, 0.9], cov: [[0.25, 0], [0, 0.16]] }
+          A: { mean: [0, 0.0], cov: [[0.25, 0], [0, 0.12]] },
+          B: { mean: [0, 1.3], cov: [[0.25, 0], [0, 0.12]] }
         }
       },
+      // Session 2：仅 x（sf）决定类别，y 维完全重叠
       2: {
         classes: {
           A: { mean: [-0.9, 0], cov: [[0.16, 0], [0, 0.25]] },
@@ -271,18 +268,20 @@
     };
     // II：两个 Session 使用对称但倾斜的类别均值，协方差带轻微相关，确保最优边界为斜线且两维都需整合
     const II_GAUSS_PARAMS = {
+      // Session 1：对角线结构，权重均衡且 y 维均值差极小，必须整合 sf+ori
       1: {
         structureKey: 'II1',
         classes: {
-          A: { mean: [-0.7, -0.7], cov: [[0.36, 0.18], [0.18, 0.36]] },
-          B: { mean: [0.7, 0.7], cov: [[0.36, 0.18], [0.18, 0.36]] }
+          A: { mean: [-0.9, 0.1], cov: [[0.36, 0.12], [0.12, 0.36]] },
+          B: { mean: [0.9, -0.1], cov: [[0.36, 0.12], [0.12, 0.36]] }
         }
       },
+      // Session 2：镜像结构，ori 项翻转（oriSign=-1），难度与 Session1 对称
       2: {
         structureKey: 'II2',
         classes: {
-          A: { mean: [-0.7, 0.7], cov: [[0.36, -0.18], [-0.18, 0.36]] },
-          B: { mean: [0.7, -0.7], cov: [[0.36, -0.18], [-0.18, 0.36]] }
+          A: { mean: [-0.9, -0.1], cov: [[0.36, -0.12], [-0.12, 0.36]] },
+          B: { mean: [0.9, 0.1], cov: [[0.36, -0.12], [-0.12, 0.36]] }
         }
       }
     };
@@ -343,9 +342,9 @@
 
     function determineBinKey(ori) {
       const absMag = Math.abs(ori);
-      if (absMag >= 1 && absMag <= 5) return 'b1';
-      if (absMag > 5 && absMag <= 10) return 'b2';
-      if (absMag > 10 && absMag <= 15) return 'b3';
+      if (absMag <= 5) return 'b1';
+      if (absMag <= 10) return 'b2';
+      if (absMag <= 15) return 'b3';
       return null;
     }
 
@@ -662,7 +661,7 @@
       if (!sessionPlan) {
         return null;
       }
-      const delayMs = (group === 'B' && sessionPlan.movement === 'Walking') ? DELAYED_STAGE_MS : 0;
+      const delayMs = group === 'B' ? DELAYED_STAGE_MS : 0;
       return {
         group,
         orderCode,
@@ -692,24 +691,26 @@
       const planTemplate = II_STRUCTURE_PLANS[sessionIndex];
       if (!planTemplate) {
         console.error(`未为 session ${sessionIndex} 定义 II 计划模板`);
-        return { rbRule: sessionIndex === 2 ? 'A_GT7' : 'A_LT7', iiPlan: [] };
+        return { rbRule: sessionIndex === 2 ? 'SF_HIGH' : 'ORI_NEAR', iiPlan: [] };
       }
       const iiPlan = planTemplate.map(item => ({ ...item }));
       if (sessionIndex === 2) {
-        return { rbRule: 'A_GT7', iiPlan };
+        return { rbRule: 'SF_HIGH', iiPlan };
       }
-      return { rbRule: 'A_LT7', iiPlan };
+      return { rbRule: 'ORI_NEAR', iiPlan };
     }
 
     // -------------------------
     // Labeling functions
     // -------------------------
-    function labelRB(oriDeg, rbRule) {
-      const absOri = Math.abs(oriDeg);
-      if (rbRule === 'A_LT7') {
-        return absOri < 7 ? 'A' : 'B';
+    function labelRB(sfLines, oriDeg, rbRule) {
+      if (rbRule === 'ORI_NEAR') {
+        return Math.abs(oriDeg) < RB_ORI_THRESHOLD_DEG ? 'A' : 'B';
       }
-      return absOri > 7 ? 'A' : 'B';
+      if (rbRule === 'SF_HIGH') {
+        return sfLines >= RB_SF_THRESHOLD ? 'A' : 'B';
+      }
+      return Math.abs(oriDeg) < RB_ORI_THRESHOLD_DEG ? 'A' : 'B';
     }
 
     function computeIIProjection(sfLines, oriDeg, structure) {
@@ -936,27 +937,43 @@
       const config = RB_GAUSS_PARAMS[sessionIndex];
       if (!config) return [];
       const rng = hashString(`GAUSS_RB_SESSION${sessionIndex}`);
-      const perClass = N_RB / 2;
+      const rule = sessionIndex === 1 ? 'ORI_NEAR' : 'SF_HIGH';
+      const perLabel = N_RB / 2;
+      const labelCounts = { A: 0, B: 0 };
       const trials = [];
-      ['A', 'B'].forEach(label => {
-        const classCfg = config.classes[label];
-        for (let i = 0; i < perClass; i++) {
-          const latent = sampleLatentPoint(classCfg, rng);
-          if (!latent) continue;
-          const stim = createStimulusFromLatent(latent);
-          trials.push({
-            sf: stim.sf,
-            ori: stim.ori,
-            binKey: determineBinKey(stim.ori),
-            nearFlag: 0,
-            symbolicFlag: 0,
-            iiStructure: '',
-            label,
-            correctKey: label === 'A' ? 'a' : 'b'
-          });
+      const guardLimit = N_RB * 400;
+      let guard = 0;
+      while ((labelCounts.A < perLabel || labelCounts.B < perLabel) && guard < guardLimit) {
+        guard += 1;
+        const targetLabel = labelCounts.A < perLabel ? 'A' : 'B';
+        const classCfg = config.classes[targetLabel];
+        if (!classCfg) break;
+        const latent = sampleLatentPoint(classCfg, rng);
+        if (!latent) continue;
+        const stim = createStimulusFromLatent(latent);
+        if (sessionIndex === 1) {
+          const magnitude = Math.abs(stim.ori);
+          const signed = clamp(Math.max(1, magnitude) * (rng() < 0.5 ? -1 : 1), ORI_MIN, ORI_MAX);
+          stim.ori = Number(signed.toFixed(3));
         }
-      });
-      ensureTrialCount(trials, N_RB);
+        const finalLabel = labelRB(stim.sf, stim.ori, rule);
+        if (finalLabel !== targetLabel) continue;
+        trials.push({
+          sf: stim.sf,
+          ori: stim.ori,
+          binKey: determineBinKey(stim.ori),
+          nearFlag: 0,
+          symbolicFlag: 0,
+          iiStructure: '',
+          label: finalLabel,
+          correctKey: finalLabel === 'A' ? 'a' : 'b'
+        });
+        labelCounts[targetLabel] += 1;
+      }
+      if (trials.length < N_RB) {
+        console.warn('RB Gaussian 采样不足，使用模板补齐', { sessionIndex, collected: trials.length });
+        ensureTrialCount(trials, N_RB);
+      }
       shuffleInPlace(trials, hashString(`GAUSS_RB_SESSION${sessionIndex}_globalShuffle`));
       const blocks = [];
       for (let blockIdx = 0; blockIdx < RB_BLOCK_COUNT; blockIdx++) {
@@ -973,19 +990,18 @@
       return blocks;
     }
 
-    function sampleIIStimulusFromGaussian(sessionIndex, label, targetSf, targetBin, structure, rng) {
+    function sampleIIStimulusFromGaussian(sessionIndex, label, structure, rng) {
       const config = II_GAUSS_PARAMS[sessionIndex];
       if (!config) return null;
       const classCfg = config.classes[label];
       if (!classCfg) return null;
-      const maxAttempts = 800;
+      const maxAttempts = 5000;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const latent = sampleLatentPoint(classCfg, rng);
         if (!latent) continue;
         const stim = createStimulusFromLatent(latent);
         const binKey = determineBinKey(stim.ori);
-        if (binKey !== targetBin) continue;
-        if (stim.sf !== targetSf) continue;
+        if (!binKey) continue;
         const projection = computeIIProjection(stim.sf, stim.ori, structure);
         const dist = Math.abs(projection.raw) / (projection.norm || 1);
         const nearFlag = dist <= 0.5 ? 1 : 0;
@@ -1009,10 +1025,9 @@
       if (!config) return [];
       const structure = getIIStructureConfig(config.structureKey);
       if (!structure) return [];
-      const combos = [];
-      SF_LINES.forEach(sf => {
-        II_BIN_KEYS.forEach(binKey => combos.push({ sf, binKey }));
-      });
+      const perLabelTotal = II_TRIALS_PER_BLOCK / 2;
+      const perLabelSf = perLabelTotal / SF_LINES.length;
+      const perLabelBin = perLabelTotal / II_BIN_KEYS.length;
       let bestBlocks = null;
       let bestScore = Infinity;
       for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
@@ -1022,21 +1037,67 @@
         for (let blockIdx = 0; blockIdx < II_BLOCK_COUNT; blockIdx++) {
           if (failed) break;
           const blockTrials = [];
-          for (const combo of combos) {
-            if (failed) break;
-            for (const label of II_LABELS) {
-              if (failed) break;
-              for (let rep = 0; rep < 2; rep++) {
-                const stim = sampleIIStimulusFromGaussian(sessionIndex, label, combo.sf, combo.binKey, structure, rng);
-                if (!stim) {
-                  failed = true;
-                  break;
-                }
-                blockTrials.push(stim);
-              }
+          const labelCounts = { A: 0, B: 0 };
+          const sfCounts = { A: {}, B: {} };
+          const binCounts = { A: {}, B: {} };
+          SF_LINES.forEach(sf => {
+            sfCounts.A[sf] = 0;
+            sfCounts.B[sf] = 0;
+          });
+          II_BIN_KEYS.forEach(binKey => {
+            binCounts.A[binKey] = 0;
+            binCounts.B[binKey] = 0;
+          });
+          const nearCounts = { A: 0, B: 0 };
+          const farCounts = { A: 0, B: 0 };
+          const targetNear = Math.round(II_TRIALS_PER_BLOCK * (II_NEAR_LOWER + (II_NEAR_UPPER - II_NEAR_LOWER) * rng()));
+          const nearQuota = {
+            A: Math.floor(targetNear / 2),
+            B: targetNear - Math.floor(targetNear / 2)
+          };
+          const farQuota = {
+            A: perLabelTotal - nearQuota.A,
+            B: perLabelTotal - nearQuota.B
+          };
+          let guard = 0;
+          const guardLimit = 120000;
+          while (blockTrials.length < II_TRIALS_PER_BLOCK && guard < guardLimit) {
+            guard += 1;
+            const label = labelCounts.A <= labelCounts.B ? 'A' : 'B';
+            const stim = sampleIIStimulusFromGaussian(sessionIndex, label, structure, rng);
+            if (!stim) {
+              failed = true;
+              break;
+            }
+            const sf = stim.sf;
+            const binKey = stim.binKey;
+            if (sfCounts[label][sf] >= perLabelSf) continue;
+            if (binCounts[label][binKey] >= perLabelBin) continue;
+            if (stim.nearFlag && nearCounts[label] >= nearQuota[label]) continue;
+            if (!stim.nearFlag && farCounts[label] >= farQuota[label]) continue;
+            blockTrials.push(stim);
+            labelCounts[label] += 1;
+            sfCounts[label][sf] += 1;
+            binCounts[label][binKey] += 1;
+            if (stim.nearFlag) {
+              nearCounts[label] += 1;
+            } else {
+              farCounts[label] += 1;
             }
           }
           if (failed || blockTrials.length !== II_TRIALS_PER_BLOCK) {
+            failed = true;
+            break;
+          }
+          const summary = summarizeIIBlock(blockTrials);
+          if (
+            summary.countA !== summary.countB ||
+            summary.nearA !== summary.nearB ||
+            summary.farA !== summary.farB ||
+            summary.nearRatio < II_NEAR_LOWER ||
+            summary.nearRatio > II_NEAR_UPPER ||
+            summary.nearSymbolicRatio < II_NEAR_SYMBOLIC_MIN_RATIO
+          ) {
             failed = true;
             break;
           }
@@ -1082,7 +1143,7 @@
     const PRECOMPUTED_GAUSSIAN_STIMULI = precomputeGaussianStimuli();
 
     function makeTrialsRB_balancedV3(participantId, rbRule) {
-      const sessionIndex = rbRule === 'A_LT7' ? 1 : 2;
+      const sessionIndex = rbRule === 'ORI_NEAR' ? 1 : 2;
       const blocks = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.RB || [];
       return cloneBlocks(blocks);
     }
@@ -1335,6 +1396,20 @@
       });
     }
 
+    function describeTask(task) {
+      return task === 'RB' ? '规则型（RB）任务' : '信息整合（II）任务';
+    }
+
+    function buildTaskIntroMessage(task, orderIndex, totalParts) {
+      const label = describeTask(task);
+      return `第${orderIndex}部分（共${totalParts}部分）：即将开始${label}，请按键盘 A/B 或点击按钮作答。`;
+    }
+
+    function buildRuleChangeMessage(task, orderIndex, totalParts) {
+      const label = describeTask(task);
+      return `提示：规则将发生变化。即将进入第${orderIndex}部分的${label}，请按任意键继续。`;
+    }
+
     async function waitAnyKey(message) {
       drawBlank();
       showWaitOverlay(message);
@@ -1526,9 +1601,17 @@
       try {
         rbBlocks = makeTrialsRB_balancedV3(participantId, sessionConfig.rbRule);
         iiBlocks = makeTrialsII_balancedV3(participantId, sessionConfig.iiPlan);
+        const needsRB = participantMeta.taskOrder.includes('RB');
+        const needsII = participantMeta.taskOrder.includes('II');
+        if (needsRB && (!rbBlocks || !rbBlocks.length)) {
+          throw new Error('RB 刺激集合为空');
+        }
+        if (needsII && (!iiBlocks || !iiBlocks.length)) {
+          throw new Error('II 刺激集合为空');
+        }
       } catch (err) {
         console.error('试次生成失败', err);
-        alert(`II 条件生成失败：${err && err.message ? err.message : err}`);
+        alert(`试次生成失败：${err && err.message ? err.message : err}`);
         experimentRunning = false;
         setExitButtonVisibility(false);
         forceResolveWaitOverlay();
@@ -1538,25 +1621,29 @@
         return;
       }
       const blockStore = { RB: rbBlocks, II: iiBlocks };
-      for (let t = 0; t < participantMeta.taskOrder.length; t++) {
+      const totalTasks = participantMeta.taskOrder.length;
+      for (let t = 0; t < totalTasks; t++) {
         const task = participantMeta.taskOrder[t];
         const blocks = blockStore[task] || [];
-        let ranBlock = false;
+        if (!blocks.length) {
+          console.warn('未找到任务区块', { task });
+          continue;
+        }
+        if (t === 0) {
+          await waitAnyKey(buildTaskIntroMessage(task, t + 1, totalTasks));
+          if (aborted) break;
+        } else {
+          const prevTask = participantMeta.taskOrder[t - 1];
+          if (task !== prevTask) {
+            await waitAnyKey(buildRuleChangeMessage(task, t + 1, totalTasks));
+            if (aborted) break;
+          }
+        }
         for (let b = 0; b < blocks.length; b++) {
           if (aborted) break;
           await runBlock(task, blocks[b], t + 1);
-          ranBlock = true;
         }
         if (aborted) break;
-        // Updated the block-loop transition logic so the “规则将发生变化”提示 now
-        // appears whenever the task order switches between RB and II, covering both
-        // RB→II and II→RB transitions as required.
-        if (ranBlock && t < participantMeta.taskOrder.length - 1) {
-          const nextTask = participantMeta.taskOrder[t + 1];
-          if (nextTask && nextTask !== task) {
-            await waitAnyKey('提示：接下来规则将发生变化，请按任意键继续。');
-          }
-        }
       }
       if (!aborted) {
         concludeExperiment();
