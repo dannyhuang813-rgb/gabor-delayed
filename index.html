@@ -1,1 +1,1831 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>Gabor 分类实验</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+    }
+    * {
+      box-sizing: border-box;
+      font-family: Arial, sans-serif;
+    }
+    body, html {
+      margin: 0;
+      height: 100%;
+      background: #888;
+      color: #111;
+    }
+    #startScreen, #experimentContainer {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 16px;
+    }
+    #experimentContainer {
+      display: none;
+    }
+    #participantInput {
+      padding: 10px 14px;
+      font-size: 18px;
+      border-radius: 6px;
+      border: 1px solid #333;
+      min-width: 260px;
+    }
+    #startButton {
+      padding: 12px 24px;
+      font-size: 18px;
+      border-radius: 6px;
+      border: none;
+      background: #2c7be5;
+      color: #fff;
+      cursor: pointer;
+    }
+    #startButton:disabled {
+      background: #777;
+      cursor: not-allowed;
+    }
+    #canvasWrapper {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: #888;
+    }
+    #feedbackOverlay {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 48px;
+      font-weight: bold;
+      text-shadow: 0 0 10px rgba(0,0,0,0.5);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.1s ease;
+    }
+    #responseButtons {
+      position: fixed;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      gap: 16px;
+      z-index: 10;
+    }
+    #responseButtons button {
+      padding: 14px 24px;
+      font-size: 18px;
+      border-radius: 999px;
+      border: none;
+      background: rgba(0,0,0,0.6);
+      color: #fff;
+      min-width: 140px;
+      cursor: pointer;
+      transition: background 0.2s ease;
+    }
+    #responseButtons button:active {
+      background: rgba(0,0,0,0.8);
+    }
+    #exitButton {
+      position: fixed;
+      top: 20px;
+      left: 20px;
+      padding: 10px 18px;
+      font-size: 16px;
+      border: none;
+      border-radius: 999px;
+      background: rgba(220, 53, 69, 0.9);
+      color: #fff;
+      cursor: pointer;
+      z-index: 12;
+      display: none;
+    }
+    #waitOverlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.65);
+      color: #fff;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 20px;
+      z-index: 20;
+    }
+    #waitOverlay.visible {
+      display: flex;
+    }
+    #waitOverlay .wait-box {
+      background: rgba(0,0,0,0.55);
+      padding: 28px 36px;
+      border-radius: 16px;
+      max-width: 520px;
+      line-height: 1.5;
+      font-size: 20px;
+    }
+    #waitOverlay button {
+      margin-top: 18px;
+      padding: 12px 32px;
+      border: none;
+      border-radius: 999px;
+      font-size: 18px;
+      background: #2c7be5;
+      color: #fff;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="startScreen">
+    <label for="participantInput">被试编号</label>
+    <input id="participantInput" type="text" autocomplete="off" />
+    <button id="startButton">开始</button>
+    <p style="max-width: 420px; text-align: center; line-height: 1.4; font-size: 14px; color: #222;">
+      点击“开始”进入 Gabor 分类实验。作答可按键 A/B，或点击屏幕下方的 A 类、B 类按钮。随时按下 Escape 可终止并立刻下载已收集数据。
+    </p>
+  </div>
+  <div id="experimentContainer">
+    <div id="canvasWrapper">
+      <canvas id="gaborCanvas"></canvas>
+      <div id="feedbackOverlay"></div>
+    </div>
+    <div id="responseButtons">
+      <button class="responseButton" data-key="a">选择 A 类（键盘 A）</button>
+      <button class="responseButton" data-key="b">选择 B 类（键盘 B）</button>
+    </div>
+  </div>
+  <button id="exitButton">退出实验</button>
+  <div id="waitOverlay">
+    <div class="wait-box">
+      <div id="waitOverlayText">提示：接下来规则将发生变化，请按任意键继续。</div>
+      <button id="waitOverlayButton">点击继续</button>
+    </div>
+  </div>
+  <script>
+    // -------------------------
+    // Configurable constants (do not mutate elsewhere)
+    // -------------------------
+    const N_RB = 200;
+    const N_II = 240;
 
+    const USE_FIXATION = true,  FIX_MS = 500;
+    const USE_PREBLANK = false, PREBLANK_MS = 0;
+    const RESP_LIMIT_MS = 3000;
+    const FEEDBACK_MS   = 500;
+
+    const ORI_MIN = -15, ORI_MAX = 15;
+    const SF_LINES = [3, 4, 5, 6]; // We store the visible黑白成对条纹数量（cycle count）到 CSV。
+
+    const ORI_JITTER = 0.5;
+
+    const RB_ORI_THRESHOLD_DEG = 7;
+    const RB_SF_THRESHOLD = 4.5; // sf>=4.5(≈5/6) → A when RB rule relies on density
+
+    const ORDER_CODE_PLANS = {
+      '1': {
+        session1: { movement: 'Seated', taskOrder: ['RB', 'II'] },
+        session2: { movement: 'Walking', taskOrder: ['II', 'RB'] }
+      },
+      '2': {
+        session1: { movement: 'Seated', taskOrder: ['II', 'RB'] },
+        session2: { movement: 'Walking', taskOrder: ['RB', 'II'] }
+      },
+      '3': {
+        session1: { movement: 'Walking', taskOrder: ['RB', 'II'] },
+        session2: { movement: 'Seated', taskOrder: ['II', 'RB'] }
+      },
+      '4': {
+        session1: { movement: 'Walking', taskOrder: ['II', 'RB'] },
+        session2: { movement: 'Seated', taskOrder: ['RB', 'II'] }
+      }
+    };
+
+    const II_STRUCTURES_LIBRARY = {
+      II1: { key: 'II1', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.0, oriSign: 1 },
+      II2: { key: 'II2', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.0, oriSign: -1 }
+    };
+
+    const II_STRUCTURE_PLANS = {
+      1: [{ key: 'II1', blocks: 5 }],
+      2: [{ key: 'II2', blocks: 5 }]
+    };
+
+    const II_SINGLE_DIM_MAX_ACCURACY = 0.6;
+    const II_MAX_PLAN_ATTEMPTS = 20;
+
+    const DELAYED_STAGE_MS = 2000;
+
+    const II_NEAR_LOWER = 0.45;
+    const II_NEAR_UPPER = 0.60; // acceptable range: [45%, 60%]
+    const II_NEAR_SYMBOLIC_MIN_RATIO = 0.60; // 至少 60% 近样本为“符号型”（x 与 y 同号）
+
+    const II_BIN_KEYS = ['b1', 'b2', 'b3'];
+    const II_BIN_RANGES = {
+      b1: { min: 1, max: 5 },
+      b2: { min: 6, max: 10 },
+      b3: { min: 11, max: 15 }
+    };
+    const II_LABELS = ['A', 'B'];
+
+    const CSV_HEADER = [
+      'participant','group','orderCode','serial','sessionIndex','movement','task','iiStructure','orderInSession',
+      'blockName','blockIndex','trialIndex','sf','ori','nearFlag','label','correctKey','resp','corr','rt','delayMs','trialStartUTC','qc_near_ratio','qc_counts_json'
+    ];
+
+    const LATENT_RANGE = { xMin: -2, xMax: 2, yMin: -2, yMax: 2 };
+    const SF_PHYSICAL_RANGE = { min: 2.8, max: 6.2 };
+    const ORI_PHYSICAL_RANGE = { min: -15, max: 15 };
+    const RB_BLOCK_COUNT = 5;
+    const RB_TRIALS_PER_BLOCK = N_RB / RB_BLOCK_COUNT;
+    const II_BLOCK_COUNT = 5;
+    const II_TRIALS_PER_BLOCK = N_II / II_BLOCK_COUNT;
+    // 二维高斯参数：定义在标准化潜在空间 (x=sf, y=ori)，取值约 [-2,2]
+    // RB：两类在单一维度（Session1: y，Session2: x）方向上分离，另一维完全重叠 → 纯一维规则
+    const RB_GAUSS_PARAMS = {
+      // Session 1：仅 y（ori magnitude）决定类别，x 维完全重叠
+      1: {
+        classes: {
+          A: { mean: [0, 0.0], cov: [[0.25, 0], [0, 0.12]] },
+          B: { mean: [0, 1.3], cov: [[0.25, 0], [0, 0.12]] }
+        }
+      },
+      // Session 2：仅 x（sf）决定类别，y 维完全重叠
+      2: {
+        classes: {
+          A: { mean: [-0.9, 0], cov: [[0.16, 0], [0, 0.25]] },
+          B: { mean: [0.9, 0], cov: [[0.16, 0], [0, 0.25]] }
+        }
+      }
+    };
+    // II：两个 Session 使用对称但倾斜的类别均值，协方差带轻微相关，确保最优边界为斜线且两维都需整合
+    const II_GAUSS_PARAMS = {
+      // Session 1：对角线结构，权重均衡且 y 维均值差极小，必须整合 sf+ori
+      1: {
+        structureKey: 'II1',
+        classes: {
+          A: { mean: [-0.9, 0.1], cov: [[0.36, 0.12], [0.12, 0.36]] },
+          B: { mean: [0.9, -0.1], cov: [[0.36, 0.12], [0.12, 0.36]] }
+        }
+      },
+      // Session 2：镜像结构，ori 项翻转（oriSign=-1），难度与 Session1 对称
+      2: {
+        structureKey: 'II2',
+        classes: {
+          A: { mean: [-0.9, -0.1], cov: [[0.36, -0.12], [-0.12, 0.36]] },
+          B: { mean: [0.9, 0.1], cov: [[0.36, -0.12], [-0.12, 0.36]] }
+        }
+      }
+    };
+
+    // -------------------------
+    // DOM references
+    // -------------------------
+    const startScreen = document.getElementById('startScreen');
+    const experimentContainer = document.getElementById('experimentContainer');
+    const startButton = document.getElementById('startButton');
+    const participantInput = document.getElementById('participantInput');
+    const canvas = document.getElementById('gaborCanvas');
+    const ctx = canvas.getContext('2d');
+    const feedbackOverlay = document.getElementById('feedbackOverlay');
+    const responseButtons = document.querySelectorAll('.responseButton');
+    const exitButton = document.getElementById('exitButton');
+    const waitOverlay = document.getElementById('waitOverlay');
+    const waitOverlayText = document.getElementById('waitOverlayText');
+    const waitOverlayButton = document.getElementById('waitOverlayButton');
+
+    // -------------------------
+    // State variables
+    // -------------------------
+    let experimentRunning = false;
+    let aborted = false;
+    let participantId = '';
+    let participantMeta = null;
+    let sessionConfig = null;
+    let dataRows = [];
+    let responseState = null;
+    let currentBlockName = '';
+    let pendingDownload = false;
+    let displayWidth = window.innerWidth;
+    let displayHeight = window.innerHeight;
+    let waitOverlayFinish = null;
+
+    // -------------------------
+    // Utility helpers
+    // -------------------------
+    function resizeCanvas() {
+      const ratio = window.devicePixelRatio || 1;
+      displayWidth = window.innerWidth;
+      displayHeight = window.innerHeight;
+      canvas.width = Math.round(displayWidth * ratio);
+      canvas.height = Math.round(displayHeight * ratio);
+      canvas.style.width = displayWidth + 'px';
+      canvas.style.height = displayHeight + 'px';
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(Math.max(value, min), max);
+    }
+
+    function wait(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function determineBinKey(ori) {
+      const absMag = Math.abs(ori);
+      if (absMag <= 5) return 'b1';
+      if (absMag <= 10) return 'b2';
+      if (absMag <= 15) return 'b3';
+      return null;
+    }
+
+    function hashString(str) {
+      let h = 1779033703 ^ str.length;
+      for (let i = 0; i < str.length; i++) {
+        h = Math.imul(h ^ str.charCodeAt(i), 3432918353);
+        h = (h << 13) | (h >>> 19);
+      }
+      return function rng() {
+        h = Math.imul(h ^ (h >>> 16), 2246822507);
+        h = Math.imul(h ^ (h >>> 13), 3266489909);
+        h ^= h >>> 16;
+        return (h >>> 0) / 4294967296;
+      };
+    }
+
+    function shuffleInPlace(array, rng) {
+      for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+      }
+    }
+
+    function shuffleBlockTrials(trials, seed) {
+      const rngShuffle = hashString(`${seed}_shuffle`);
+      const rngSwap = hashString(`${seed}_swap`);
+      const shuffled = trials.map(trial => ({ ...trial }));
+      shuffleInPlace(shuffled, rngShuffle);
+      const tolerance = 0.01;
+      const maxAttempts = Math.max(10, shuffled.length * 2);
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        let violationIndex = -1;
+        for (let i = 0; i < shuffled.length - 1; i++) {
+          const a = shuffled[i];
+          const b = shuffled[i + 1];
+          if (Math.sign(a.ori) !== Math.sign(b.ori) && Math.abs(Math.abs(a.ori) - Math.abs(b.ori)) < tolerance) {
+            violationIndex = i;
+            break;
+          }
+        }
+        if (violationIndex === -1) break;
+        let swapIdx = Math.floor(rngSwap() * shuffled.length);
+        if (swapIdx === violationIndex || swapIdx === violationIndex + 1) {
+          swapIdx = (swapIdx + 2) % shuffled.length;
+        }
+        [shuffled[violationIndex + 1], shuffled[swapIdx]] = [shuffled[swapIdx], shuffled[violationIndex + 1]];
+      }
+      shuffled.forEach((trial, idx) => {
+        trial.trialIndex = idx + 1;
+      });
+      return shuffled;
+    }
+
+    function analyzeLabelRuns(trials) {
+      let maxRun = 1;
+      let currentRun = 1;
+      for (let i = 1; i < trials.length; i++) {
+        if (trials[i].label === trials[i - 1].label) {
+          currentRun += 1;
+        } else {
+          if (currentRun > maxRun) maxRun = currentRun;
+          currentRun = 1;
+        }
+      }
+      if (currentRun > maxRun) maxRun = currentRun;
+      return maxRun;
+    }
+
+    function maxWindowLabelDiff(trials, windowSize = 12) {
+      if (trials.length < windowSize) return 0;
+      const prefixA = new Array(trials.length + 1).fill(0);
+      for (let i = 0; i < trials.length; i++) {
+        prefixA[i + 1] = prefixA[i] + (trials[i].label === 'A' ? 1 : 0);
+      }
+      let maxDiff = 0;
+      for (let start = 0; start <= trials.length - windowSize; start++) {
+        const countA = prefixA[start + windowSize] - prefixA[start];
+        const countB = windowSize - countA;
+        const diff = Math.abs(countA - countB);
+        if (diff > maxDiff) maxDiff = diff;
+      }
+      return maxDiff;
+    }
+
+    function shuffleIIBlockTrialsWithAntiStreak(trials, seed) {
+      const maxAttempts = 800;
+      let bestCandidate = null;
+      let bestScore = Infinity;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const candidate = shuffleBlockTrials(trials, `${seed}_anti${attempt}`);
+        const maxRun = analyzeLabelRuns(candidate);
+        const windowDiff = maxWindowLabelDiff(candidate, 12);
+        const runPenalty = Math.max(0, maxRun - 3);
+        const windowPenalty = Math.max(0, windowDiff - 2);
+        const score = runPenalty * 100 + windowPenalty * 10 + attempt * 0.001;
+        if (runPenalty === 0 && windowPenalty === 0) {
+          return candidate;
+        }
+        if (score < bestScore) {
+          bestScore = score;
+          bestCandidate = candidate;
+        }
+      }
+      console.warn('II block ordering fell back to best-effort anti-streak sequence', { seed });
+      return bestCandidate || shuffleBlockTrials(trials, `${seed}_fallback`);
+    }
+
+    function summarizeIIBlock(trials) {
+      const summary = {
+        total: trials.length,
+        countA: 0,
+        countB: 0,
+        sfCounts: { 3: 0, 4: 0, 5: 0, 6: 0 },
+        binCounts: { b1: 0, b2: 0, b3: 0 },
+        nearCount: 0,
+        nearA: 0,
+        nearB: 0,
+        farA: 0,
+        farB: 0,
+        nearSymbolic: 0
+      };
+      trials.forEach(trial => {
+        if (trial.label === 'A') summary.countA += 1; else summary.countB += 1;
+        if (summary.sfCounts[trial.sf] != null) summary.sfCounts[trial.sf] += 1;
+        const binKey = trial.binKey || determineBinKey(trial.ori);
+        if (binKey && summary.binCounts[binKey] != null) summary.binCounts[binKey] += 1;
+        if (trial.nearFlag) {
+          summary.nearCount += 1;
+          if (trial.label === 'A') summary.nearA += 1; else summary.nearB += 1;
+          if (trial.symbolicFlag) summary.nearSymbolic += 1;
+        } else {
+          if (trial.label === 'A') summary.farA += 1; else summary.farB += 1;
+        }
+      });
+      summary.nearRatio = summary.total ? summary.nearCount / summary.total : 0;
+      summary.nearSymbolicRatio = summary.nearCount ? summary.nearSymbolic / summary.nearCount : 0;
+      return summary;
+    }
+
+    function evaluateSfBinBalance(trials, structure) {
+      const sfStats = new Map();
+      const binStats = new Map();
+      const comboMap = new Map();
+      trials.forEach(trial => {
+        const binKey = trial.binKey || determineBinKey(trial.ori);
+        if (!sfStats.has(trial.sf)) {
+          sfStats.set(trial.sf, { A: 0, B: 0 });
+        }
+        if (!binStats.has(binKey)) {
+          binStats.set(binKey, { A: 0, B: 0 });
+        }
+        const sfEntry = sfStats.get(trial.sf);
+        const binEntry = binStats.get(binKey);
+        sfEntry[trial.label] += 1;
+        binEntry[trial.label] += 1;
+        const comboKey = `${trial.sf}_${binKey}`;
+        if (!comboMap.has(comboKey)) {
+          comboMap.set(comboKey, { total: 0, countA: 0, countB: 0 });
+        }
+        const comboEntry = comboMap.get(comboKey);
+        comboEntry.total += 1;
+        comboEntry[`count${trial.label}`] += 1;
+      });
+      const sfOk = SF_LINES.every(sf => {
+        const stats = sfStats.get(sf);
+        return stats && stats.A === stats.B;
+      });
+      const binOk = II_BIN_KEYS.every(binKey => {
+        const stats = binStats.get(binKey);
+        return stats && stats.A === stats.B;
+      });
+      let comboPenalty = 0;
+      let comboMaxDiff = 0;
+      for (const sf of SF_LINES) {
+        for (const binKey of II_BIN_KEYS) {
+          const stats = comboMap.get(`${sf}_${binKey}`) || { total: 0, countA: 0, countB: 0 };
+          const feasibleA = structure ? isLabelFeasible(structure, sf, binKey, 'A') : true;
+          const feasibleB = structure ? isLabelFeasible(structure, sf, binKey, 'B') : true;
+          if (feasibleA && feasibleB) {
+            const diff = Math.abs(stats.countA - stats.countB);
+            if (stats.total === 0) {
+              comboPenalty += 4;
+            } else {
+              comboPenalty += diff;
+            }
+            if (diff > comboMaxDiff) comboMaxDiff = diff;
+          } else if (!feasibleA && !feasibleB) {
+            if (stats.total > 0) {
+              comboPenalty += stats.total * 2;
+            }
+          } else {
+            const impossibleCount = feasibleA ? stats.countB : stats.countA;
+            if (impossibleCount > 0) {
+              comboPenalty += impossibleCount * 10;
+            }
+          }
+        }
+      }
+      return { sfOk, binOk, comboPenalty, comboMaxDiff };
+    }
+
+    function isLabelFeasible(structure, sf, binKey, targetLabel) {
+      const range = II_BIN_RANGES[binKey];
+      if (!range) return false;
+      const steps = 24;
+      const signs = [-1, 1];
+      for (const sign of signs) {
+        for (let i = 0; i <= steps; i++) {
+          const t = i / steps;
+          const mag = range.min + (range.max - range.min) * t;
+          const ori = clamp(sign * mag, ORI_MIN, ORI_MAX);
+          const label = labelII(sf, ori, structure);
+          if (label === targetLabel) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function allocateIIComboCounts(structure, rng) {
+      const perSfLabel = (48 / SF_LINES.length) / 2;
+      const perBinLabel = (48 / II_BIN_KEYS.length) / 2;
+      const feasibleMap = {};
+      const infeasiblePairs = [];
+      for (const label of II_LABELS) {
+        feasibleMap[label] = {};
+        for (const sf of SF_LINES) {
+          const feasibleBins = II_BIN_KEYS.filter(binKey => isLabelFeasible(structure, sf, binKey, label));
+          feasibleMap[label][sf] = feasibleBins;
+          if (!feasibleBins.length) {
+            infeasiblePairs.push({ label, sf });
+          }
+        }
+      }
+      const queue = [];
+      for (const label of II_LABELS) {
+        for (const sf of SF_LINES) {
+          const options = feasibleMap[label][sf];
+          if (!options.length) continue;
+          for (let i = 0; i < perSfLabel; i++) {
+            queue.push({ label, sf, options: options.slice() });
+          }
+        }
+      }
+      if (!queue.length) {
+        console.error('II alloc failed：没有可行的 label/sf 组合', { structure: structure.key });
+        return null;
+      }
+      if (queue.length < 48) {
+        const deficit = 48 - queue.length;
+        console.warn('II alloc shortfall due to infeasible combos，自动补齐', {
+          structure: structure.key,
+          deficit,
+          infeasiblePairs
+        });
+        const clones = [];
+        for (let i = 0; i < deficit; i++) {
+          const src = queue[i % queue.length];
+          clones.push({ label: src.label, sf: src.sf, options: src.options.slice() });
+        }
+        queue.push(...clones);
+      }
+      queue.sort((a, b) => {
+        if (a.options.length !== b.options.length) {
+          return a.options.length - b.options.length;
+        }
+        return (rng() - 0.5);
+      });
+      const remainingBinLabel = {};
+      II_BIN_KEYS.forEach(binKey => {
+        remainingBinLabel[binKey] = { A: perBinLabel, B: perBinLabel };
+      });
+      const allocations = {};
+      for (const item of queue) {
+        const feasibleBins = item.options.filter(binKey => remainingBinLabel[binKey][item.label] > 0);
+        if (!feasibleBins.length) {
+          console.warn('II alloc failed for label-sf pair', { structure: structure.key, sf: item.sf, label: item.label });
+          return null;
+        }
+        feasibleBins.sort((a, b) => remainingBinLabel[b][item.label] - remainingBinLabel[a][item.label]);
+        const topRemaining = remainingBinLabel[feasibleBins[0]][item.label];
+        const bestBins = feasibleBins.filter(binKey => remainingBinLabel[binKey][item.label] === topRemaining);
+        const selected = bestBins[Math.floor(rng() * bestBins.length) % bestBins.length];
+        if (!allocations[selected]) allocations[selected] = {};
+        if (!allocations[selected][item.sf]) allocations[selected][item.sf] = { A: 0, B: 0 };
+        allocations[selected][item.sf][item.label] += 1;
+        remainingBinLabel[selected][item.label] -= 1;
+      }
+      return allocations;
+    }
+
+    // -------------------------
+    // Participant driven configuration
+    // -------------------------
+    function parseIdV2(id, sessionIndex) {
+      const trimmed = (id || '').trim().toUpperCase();
+      const match = trimmed.match(/^([AB])([1-4])(\d+)$/);
+      if (!match) {
+        return null;
+      }
+      if (sessionIndex !== 1 && sessionIndex !== 2) {
+        return null;
+      }
+      const group = match[1];
+      const orderCode = match[2];
+      const serial = match[3];
+      const plan = ORDER_CODE_PLANS[orderCode];
+      if (!plan) {
+        return null;
+      }
+      const sessionPlan = sessionIndex === 1 ? plan.session1 : plan.session2;
+      if (!sessionPlan) {
+        return null;
+      }
+      const delayMs = group === 'B' ? DELAYED_STAGE_MS : 0;
+      return {
+        group,
+        orderCode,
+        serial,
+        sessionIndex,
+        movement: sessionPlan.movement,
+        taskOrder: [...sessionPlan.taskOrder],
+        delayMs
+      };
+    }
+
+    function requestSessionIndex() {
+      while (true) {
+        const response = window.prompt('本次是第几次进行实验？请选择 1 或 2');
+        if (response === null) {
+          return null;
+        }
+        const trimmed = response.trim();
+        if (trimmed === '1' || trimmed === '2') {
+          return Number(trimmed);
+        }
+        alert('请输入数字 1 或 2。');
+      }
+    }
+
+    function sessionParams(sessionIndex) {
+      const planTemplate = II_STRUCTURE_PLANS[sessionIndex];
+      if (!planTemplate) {
+        console.error(`未为 session ${sessionIndex} 定义 II 计划模板`);
+        return { rbRule: sessionIndex === 2 ? 'SF_HIGH' : 'ORI_NEAR', iiPlan: [] };
+      }
+      const iiPlan = planTemplate.map(item => ({ ...item }));
+      if (sessionIndex === 2) {
+        return { rbRule: 'SF_HIGH', iiPlan };
+      }
+      return { rbRule: 'ORI_NEAR', iiPlan };
+    }
+
+    // -------------------------
+    // Labeling functions
+    // -------------------------
+    function labelRB(sfLines, oriDeg, rbRule) {
+      if (rbRule === 'ORI_NEAR') {
+        return Math.abs(oriDeg) < RB_ORI_THRESHOLD_DEG ? 'A' : 'B';
+      }
+      if (rbRule === 'SF_HIGH') {
+        return sfLines >= RB_SF_THRESHOLD ? 'A' : 'B';
+      }
+      return Math.abs(oriDeg) < RB_ORI_THRESHOLD_DEG ? 'A' : 'B';
+    }
+
+    function computeIIProjection(sfLines, oriDeg, structure) {
+      const cfg = structure || {};
+      const weights = cfg.weights || { wsf: 0.5, wori: 0.5 };
+      const bias = cfg.bias || 0;
+      const oriSign = cfg.oriSign || 1;
+      const x = (sfLines - 4.5) / 1.5;
+      const yRaw = oriDeg / 15;
+      const y = oriSign * yRaw;
+      const raw = weights.wsf * x + weights.wori * y - bias;
+      const norm = Math.sqrt(weights.wsf * weights.wsf + weights.wori * weights.wori);
+      return { x, y, yRaw, raw, norm };
+    }
+
+    function labelII(sfLines, oriDeg, structure) {
+      return computeIIProjection(sfLines, oriDeg, structure).raw > 0 ? 'A' : 'B';
+    }
+
+    // -------------------------
+    // Stimulus generation helpers
+    // -------------------------
+    function buildSfSchedule(total, seed) {
+      const perLevel = Math.floor(total / SF_LINES.length);
+      let remainder = total - perLevel * SF_LINES.length;
+      const schedule = [];
+      for (const sf of SF_LINES) {
+        const count = perLevel + (remainder > 0 ? 1 : 0);
+        if (remainder > 0) remainder--;
+        for (let i = 0; i < count; i++) {
+          schedule.push(sf);
+        }
+      }
+      shuffleInPlace(schedule, hashString(`${seed}_sfSchedule`));
+      return schedule;
+    }
+
+    function buildSfScheduleForSet(total, allowedSfs, seed) {
+      const perLevel = Math.floor(total / allowedSfs.length);
+      let remainder = total - perLevel * allowedSfs.length;
+      const schedule = [];
+      for (const sf of allowedSfs) {
+        const count = perLevel + (remainder > 0 ? 1 : 0);
+        if (remainder > 0) remainder--;
+        for (let i = 0; i < count; i++) {
+          schedule.push(sf);
+        }
+      }
+      shuffleInPlace(schedule, hashString(`${seed}_subsetSf`));
+      return schedule;
+    }
+
+    function buildSymmetricOrientationList(minMag, maxMag, includeZero, total, seed) {
+      const cycle = [];
+      if (includeZero && minMag === 0) {
+        cycle.push(0);
+      }
+      const startMag = Math.max(1, minMag);
+      if (startMag > maxMag && !(includeZero && minMag === 0)) {
+        return [];
+      }
+      for (let mag = startMag; mag <= maxMag; mag++) {
+        cycle.push(-mag, mag);
+      }
+      if (cycle.length === 0) {
+        return [];
+      }
+      const result = [];
+      const baseCycles = Math.floor(total / cycle.length);
+      for (let i = 0; i < baseCycles; i++) {
+        const copy = [...cycle];
+        shuffleInPlace(copy, hashString(`${seed}_cycle_${i}`));
+        result.push(...copy);
+      }
+      let remaining = total - baseCycles * cycle.length;
+      if (includeZero && minMag === 0 && remaining > 0) {
+        result.push(0);
+        remaining -= 1;
+      }
+      if (includeZero && minMag === 0 && remaining % 2 === 1) {
+        result.push(0);
+        remaining -= 1;
+      }
+      let mag = startMag;
+      while (remaining > 0) {
+        if (mag > maxMag) {
+          mag = startMag;
+        }
+        if (remaining >= 2) {
+          result.push(-mag, mag);
+          remaining -= 2;
+          mag += 1;
+        } else {
+          break;
+        }
+      }
+      return result.slice(0, total);
+    }
+
+    function symmetricPairMagnitudes(start, end, pairCount) {
+      const mags = [];
+      let mag = start;
+      for (let i = 0; i < pairCount; i++) {
+        mags.push(mag);
+        mag += 1;
+        if (mag > end) mag = start;
+      }
+      return mags;
+    }
+
+    function buildRBBin(magStart, magEnd, count, seed, binKey, jitterMax = 0.4) {
+      const pairCount = count / 2;
+      const mags = symmetricPairMagnitudes(magStart, magEnd, pairCount);
+      const rng = hashString(seed);
+      const orientations = [];
+      mags.forEach((mag, idx) => {
+        const jitter = (rng() * 2 - 1) * jitterMax;
+        const magWithJitter = clamp(mag + jitter, ORI_MIN, ORI_MAX);
+        orientations.push({ ori: magWithJitter, binKey }, { ori: -magWithJitter, binKey });
+      });
+      shuffleInPlace(orientations, hashString(`${seed}_shuffle`));
+      return orientations;
+    }
+
+
+    function getIIStructureConfig(key) {
+      return II_STRUCTURES_LIBRARY[key] || null;
+    }
+
+    function formatIIStructureFormula(structure) {
+      if (!structure) return '';
+      const weights = structure.weights || { wsf: 0.5, wori: 0.5 };
+      const oriSymbol = structure.oriSign === -1 ? '-y' : 'y';
+      const bias = structure.bias || 0;
+      return `${structure.key}: score = ${weights.wsf.toFixed(2)} * x + ${weights.wori.toFixed(2)} * ${oriSymbol} - ${bias.toFixed(2)} (x=(sf-4.5)/1.5, y=ori/15)`;
+    }
+
+    function linearMap(value, inMin, inMax, outMin, outMax) {
+      const ratio = (value - inMin) / (inMax - inMin);
+      return outMin + ratio * (outMax - outMin);
+    }
+
+    function sampleStandardNormal(rng) {
+      const u1 = Math.max(rng(), Number.EPSILON);
+      const u2 = rng();
+      return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    }
+
+    function cholesky2x2(matrix) {
+      const a = matrix[0][0];
+      const b = matrix[0][1];
+      const c = matrix[1][1];
+      const l11 = Math.sqrt(Math.max(a, 1e-6));
+      const l21 = b / l11;
+      const l22 = Math.sqrt(Math.max(c - l21 * l21, 1e-6));
+      return [
+        [l11, 0],
+        [l21, l22]
+      ];
+    }
+
+    function sampleBivariateNormal(mean, cov, rng) {
+      const z0 = sampleStandardNormal(rng);
+      const z1 = sampleStandardNormal(rng);
+      const L = cholesky2x2(cov);
+      const x = mean[0] + L[0][0] * z0;
+      const y = mean[1] + L[1][0] * z0 + L[1][1] * z1;
+      return [x, y];
+    }
+
+    function sampleLatentPoint(params, rng) {
+      const maxAttempts = 400;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const point = sampleBivariateNormal(params.mean, params.cov, rng);
+        if (point[0] < LATENT_RANGE.xMin || point[0] > LATENT_RANGE.xMax) continue;
+        if (point[1] < LATENT_RANGE.yMin || point[1] > LATENT_RANGE.yMax) continue;
+        return point;
+      }
+      return null;
+    }
+
+    function mapLatentToPhysical(x, y) {
+      const sf = clamp(linearMap(x, LATENT_RANGE.xMin, LATENT_RANGE.xMax, SF_PHYSICAL_RANGE.min, SF_PHYSICAL_RANGE.max), SF_PHYSICAL_RANGE.min, SF_PHYSICAL_RANGE.max);
+      const ori = clamp(linearMap(y, LATENT_RANGE.yMin, LATENT_RANGE.yMax, ORI_PHYSICAL_RANGE.min, ORI_PHYSICAL_RANGE.max), ORI_PHYSICAL_RANGE.min, ORI_PHYSICAL_RANGE.max);
+      return { sf, ori };
+    }
+
+    function quantizeSfLines(value) {
+      let best = SF_LINES[0];
+      let bestDiff = Infinity;
+      SF_LINES.forEach(target => {
+        const diff = Math.abs(value - target);
+        if (diff < bestDiff) {
+          bestDiff = diff;
+          best = target;
+        }
+      });
+      return best;
+    }
+
+    function createStimulusFromLatent(latentPoint) {
+      const mapped = mapLatentToPhysical(latentPoint[0], latentPoint[1]);
+      return {
+        sf: quantizeSfLines(mapped.sf),
+        ori: Number(mapped.ori.toFixed(3))
+      };
+    }
+
+    function cloneBlocks(blocks) {
+      return blocks.map(block => block.map(trial => ({ ...trial })));
+    }
+
+    function ensureTrialCount(trials, desiredTotal) {
+      if (trials.length >= desiredTotal) return;
+      if (!trials.length) throw new Error('无法补齐试次数：trial 列表为空');
+      const deficit = desiredTotal - trials.length;
+      for (let i = 0; i < deficit; i++) {
+        const template = trials[i % trials.length];
+        trials.push({ ...template });
+      }
+    }
+
+    function generateGaussianRBBlocks(sessionIndex) {
+      const config = RB_GAUSS_PARAMS[sessionIndex];
+      if (!config) return [];
+      const rng = hashString(`GAUSS_RB_SESSION${sessionIndex}`);
+      const rule = sessionIndex === 1 ? 'ORI_NEAR' : 'SF_HIGH';
+      const perLabel = N_RB / 2;
+      const labelCounts = { A: 0, B: 0 };
+      const trials = [];
+      const guardLimit = N_RB * 400;
+      let guard = 0;
+      while ((labelCounts.A < perLabel || labelCounts.B < perLabel) && guard < guardLimit) {
+        guard += 1;
+        const targetLabel = labelCounts.A < perLabel ? 'A' : 'B';
+        const classCfg = config.classes[targetLabel];
+        if (!classCfg) break;
+        const latent = sampleLatentPoint(classCfg, rng);
+        if (!latent) continue;
+        const stim = createStimulusFromLatent(latent);
+        if (sessionIndex === 1) {
+          const magnitude = Math.abs(stim.ori);
+          const signed = clamp(Math.max(1, magnitude) * (rng() < 0.5 ? -1 : 1), ORI_MIN, ORI_MAX);
+          stim.ori = Number(signed.toFixed(3));
+        }
+        const finalLabel = labelRB(stim.sf, stim.ori, rule);
+        if (finalLabel !== targetLabel) continue;
+        trials.push({
+          sf: stim.sf,
+          ori: stim.ori,
+          binKey: determineBinKey(stim.ori),
+          nearFlag: 0,
+          symbolicFlag: 0,
+          iiStructure: '',
+          label: finalLabel,
+          correctKey: finalLabel === 'A' ? 'a' : 'b'
+        });
+        labelCounts[targetLabel] += 1;
+      }
+      if (trials.length < N_RB) {
+        console.warn('RB Gaussian 采样不足，使用模板补齐', { sessionIndex, collected: trials.length });
+        ensureTrialCount(trials, N_RB);
+      }
+      shuffleInPlace(trials, hashString(`GAUSS_RB_SESSION${sessionIndex}_globalShuffle`));
+      const blocks = [];
+      for (let blockIdx = 0; blockIdx < RB_BLOCK_COUNT; blockIdx++) {
+        const slice = trials.slice(blockIdx * RB_TRIALS_PER_BLOCK, (blockIdx + 1) * RB_TRIALS_PER_BLOCK);
+        const annotated = slice.map((trial, idx) => ({
+          ...trial,
+          blockName: `RB-${blockIdx + 1}`,
+          blockIndex: blockIdx + 1,
+          trialIndex: idx + 1
+        }));
+        const shuffled = shuffleBlockTrials(annotated, `GAUSS_RB_SESSION${sessionIndex}_block${blockIdx}`);
+        blocks.push(shuffled);
+      }
+      return blocks;
+    }
+
+    function sampleIIStimulusFromGaussian(sessionIndex, label, structure, rng) {
+      const config = II_GAUSS_PARAMS[sessionIndex];
+      if (!config) return null;
+      const classCfg = config.classes[label];
+      if (!classCfg) return null;
+      const maxAttempts = 5000;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const latent = sampleLatentPoint(classCfg, rng);
+        if (!latent) continue;
+        const stim = createStimulusFromLatent(latent);
+        const binKey = determineBinKey(stim.ori);
+        if (!binKey) continue;
+        const projection = computeIIProjection(stim.sf, stim.ori, structure);
+        const dist = Math.abs(projection.raw) / (projection.norm || 1);
+        const nearFlag = dist <= 0.5 ? 1 : 0;
+        const symbolicFlag = (Math.sign(projection.x) !== 0 && Math.sign(projection.x) === Math.sign(projection.y)) ? 1 : 0;
+        return {
+          sf: stim.sf,
+          ori: stim.ori,
+          binKey,
+          nearFlag,
+          symbolicFlag,
+          label,
+          iiStructure: structure.key,
+          correctKey: label === 'A' ? 'a' : 'b'
+        };
+      }
+      return null;
+    }
+
+    function sampleIIStimulusMatching(sessionIndex, label, structure, targetSf, targetBin, desiredZone, rng) {
+      const config = II_GAUSS_PARAMS[sessionIndex];
+      if (!config) return null;
+      const classCfg = config.classes[label];
+      if (!classCfg) return null;
+      const maxAttempts = desiredZone === 'any' ? 5000 : 8000;
+      const strictLimit = desiredZone === 'any' ? 0 : Math.floor(maxAttempts * 0.6);
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const latent = sampleLatentPoint(classCfg, rng);
+        if (!latent) continue;
+        const stim = createStimulusFromLatent(latent);
+        if (stim.sf !== targetSf) continue;
+        const binKey = determineBinKey(stim.ori);
+        if (binKey !== targetBin) continue;
+        const projection = computeIIProjection(stim.sf, stim.ori, structure);
+        const dist = Math.abs(projection.raw) / (projection.norm || 1);
+        const nearFlag = dist <= 0.5 ? 1 : 0;
+        if (desiredZone === 'near' && attempt < strictLimit && !nearFlag) continue;
+        if (desiredZone === 'far' && attempt < strictLimit && nearFlag) continue;
+        const symbolicFlag = (Math.sign(projection.x) !== 0 && Math.sign(projection.x) === Math.sign(projection.y)) ? 1 : 0;
+        return {
+          sf: stim.sf,
+          ori: stim.ori,
+          binKey,
+          nearFlag,
+          symbolicFlag,
+          label,
+          iiStructure: structure.key,
+          correctKey: label === 'A' ? 'a' : 'b'
+        };
+      }
+      return null;
+    }
+
+    function generateGaussianIIBlocks(sessionIndex) {
+      const config = II_GAUSS_PARAMS[sessionIndex];
+      if (!config) return [];
+      const structure = getIIStructureConfig(config.structureKey);
+      if (!structure) return [];
+      const perLabelTotal = II_TRIALS_PER_BLOCK / 2;
+      let bestBlocks = null;
+      let bestScore = Infinity;
+      for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
+        const rng = hashString(`GAUSS_II_SESSION${sessionIndex}_attempt${attempt}`);
+        const blocks = [];
+        let failed = false;
+        for (let blockIdx = 0; blockIdx < II_BLOCK_COUNT; blockIdx++) {
+          const allocations = allocateIIComboCounts(structure, rng);
+          if (!allocations) {
+            failed = true;
+            break;
+          }
+          const minNear = Math.round(II_TRIALS_PER_BLOCK * II_NEAR_LOWER);
+          const maxNear = Math.round(II_TRIALS_PER_BLOCK * II_NEAR_UPPER);
+          let targetNear = Math.round(II_TRIALS_PER_BLOCK * (II_NEAR_LOWER + (II_NEAR_UPPER - II_NEAR_LOWER) * rng()));
+          targetNear = clamp(targetNear, minNear, maxNear);
+          if (targetNear % 2 === 1) {
+            targetNear += targetNear < maxNear ? 1 : -1;
+          }
+          let farTotal = II_TRIALS_PER_BLOCK - targetNear;
+          if (farTotal % 2 === 1) {
+            if (targetNear > minNear) {
+              targetNear -= 1;
+            } else if (targetNear < maxNear) {
+              targetNear += 1;
+            }
+            farTotal = II_TRIALS_PER_BLOCK - targetNear;
+          }
+          const nearQuota = {
+            A: targetNear / 2,
+            B: targetNear / 2
+          };
+          const farQuota = {
+            A: farTotal / 2,
+            B: farTotal / 2
+          };
+          const nearCounts = { A: 0, B: 0 };
+          const farCounts = { A: 0, B: 0 };
+          const blockTrials = [];
+          for (const binKey of II_BIN_KEYS) {
+            if (failed) break;
+            for (const sf of SF_LINES) {
+              if (failed) break;
+              const cell = allocations[binKey]?.[sf];
+              if (!cell) continue;
+              for (const label of II_LABELS) {
+                const need = cell[label] || 0;
+                for (let rep = 0; rep < need; rep++) {
+                  const remainingNear = nearQuota[label] - nearCounts[label];
+                  const remainingFar = farQuota[label] - farCounts[label];
+                  let desiredZone = 'any';
+                  if (remainingNear > 0 && remainingFar > 0) {
+                    desiredZone = remainingNear >= remainingFar ? 'near' : 'far';
+                  } else if (remainingNear > 0) {
+                    desiredZone = 'near';
+                  } else if (remainingFar > 0) {
+                    desiredZone = 'far';
+                  }
+                  const stim = sampleIIStimulusMatching(sessionIndex, label, structure, sf, binKey, desiredZone, rng);
+                  if (!stim) {
+                    failed = true;
+                    break;
+                  }
+                  blockTrials.push(stim);
+                  if (stim.nearFlag) {
+                    nearCounts[label] += 1;
+                  } else {
+                    farCounts[label] += 1;
+                  }
+                }
+                if (failed) break;
+              }
+            }
+          }
+          if (failed || blockTrials.length !== II_TRIALS_PER_BLOCK) {
+            failed = true;
+            break;
+          }
+          const summary = summarizeIIBlock(blockTrials);
+          if (
+            summary.countA !== summary.countB ||
+            summary.nearA !== summary.nearB ||
+            summary.farA !== summary.farB ||
+            summary.nearRatio < II_NEAR_LOWER ||
+            summary.nearRatio > II_NEAR_UPPER ||
+            summary.nearSymbolicRatio < II_NEAR_SYMBOLIC_MIN_RATIO
+          ) {
+            failed = true;
+            break;
+          }
+          const ordered = shuffleIIBlockTrialsWithAntiStreak(blockTrials, `GAUSS_II_SESSION${sessionIndex}_block${blockIdx}_attempt${attempt}`);
+          ordered.forEach((trial, idx) => {
+            trial.blockName = `II-${blocks.length + 1}`;
+            trial.blockIndex = blocks.length + 1;
+            trial.trialIndex = idx + 1;
+          });
+          blocks.push(ordered);
+        }
+        if (failed) continue;
+        const flat = blocks.flat();
+        const heur = evaluateSingleDimHeuristics(flat);
+        if (heur <= II_SINGLE_DIM_MAX_ACCURACY) {
+          console.log(`II session ${sessionIndex}: 单维启发式最大正确率 ${heur.toFixed(3)} ≤ ${II_SINGLE_DIM_MAX_ACCURACY}`);
+          return blocks;
+        }
+        if (heur < bestScore) {
+          bestScore = heur;
+          bestBlocks = blocks;
+        }
+      }
+      if (bestBlocks) {
+        console.warn(`II session ${sessionIndex}: 未达到单维阈值，使用最佳候选 (max acc=${bestScore.toFixed(3)})`);
+        return bestBlocks;
+      }
+      console.error(`II session ${sessionIndex}: 无法生成高斯刺激计划`);
+      return [];
+    }
+
+    function precomputeGaussianStimuli() {
+      const store = {};
+      [1, 2].forEach(sessionIdx => {
+        store[sessionIdx] = {
+          RB: generateGaussianRBBlocks(sessionIdx),
+          II: generateGaussianIIBlocks(sessionIdx)
+        };
+      });
+      return store;
+    }
+
+    const PRECOMPUTED_GAUSSIAN_STIMULI = precomputeGaussianStimuli();
+
+    function makeTrialsRB_balancedV3(participantId, rbRule) {
+      const sessionIndex = rbRule === 'ORI_NEAR' ? 1 : 2;
+      const blocks = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.RB || [];
+      return cloneBlocks(blocks);
+    }
+
+    function evaluateSingleDimHeuristics(trials) {
+      if (!trials || trials.length === 0) return 0;
+      const total = trials.length;
+      const classifiers = [];
+      const sfThresholds = [3.5, 4.5, 5.5];
+      sfThresholds.forEach(th => {
+        classifiers.push(t => (t.sf <= th ? 'A' : 'B'));
+        classifiers.push(t => (t.sf <= th ? 'B' : 'A'));
+        classifiers.push(t => (t.sf < th ? 'A' : 'B'));
+        classifiers.push(t => (t.sf < th ? 'B' : 'A'));
+      });
+      for (let deg = 1; deg <= 15; deg++) {
+        classifiers.push(t => (Math.abs(t.ori) <= deg ? 'A' : 'B'));
+        classifiers.push(t => (Math.abs(t.ori) <= deg ? 'B' : 'A'));
+        classifiers.push(t => (t.ori <= deg ? 'A' : 'B'));
+        classifiers.push(t => (t.ori <= deg ? 'B' : 'A'));
+        classifiers.push(t => (t.ori >= deg ? 'A' : 'B'));
+        classifiers.push(t => (t.ori >= deg ? 'B' : 'A'));
+      }
+      classifiers.push(t => (t.ori >= 0 ? 'A' : 'B'));
+      classifiers.push(t => (t.ori >= 0 ? 'B' : 'A'));
+      classifiers.push(t => (t.ori <= 0 ? 'A' : 'B'));
+      classifiers.push(t => (t.ori <= 0 ? 'B' : 'A'));
+      let maxAccuracy = 0;
+      classifiers.forEach(fn => {
+        let correct = 0;
+        for (const trial of trials) {
+          if (fn(trial) === trial.label) correct += 1;
+        }
+        const acc = correct / total;
+        if (acc > maxAccuracy) maxAccuracy = acc;
+      });
+      return maxAccuracy;
+    }
+
+    function makeTrialsII_balancedV3(participantId, plan) {
+      if (!Array.isArray(plan) || !plan.length) {
+        return [];
+      }
+      const key = plan[0]?.key;
+      const sessionIndex = key === 'II1' ? 1 : 2;
+      const blocks = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.II || [];
+      return cloneBlocks(blocks);
+    }
+    // -------------------------
+    // Stimulus rendering
+    // -------------------------
+    function drawBackground() {
+      ctx.fillStyle = '#888';
+      ctx.fillRect(0, 0, displayWidth, displayHeight);
+    }
+
+    function drawFixation() {
+      drawBackground();
+      const centerX = displayWidth / 2;
+      const centerY = displayHeight / 2;
+      ctx.strokeStyle = '#111';
+      const ratio = window.devicePixelRatio || 1;
+      ctx.lineWidth = 4 / ratio;
+      const size = Math.min(displayWidth, displayHeight) * 0.02;
+      ctx.beginPath();
+      ctx.moveTo(centerX - size, centerY);
+      ctx.lineTo(centerX + size, centerY);
+      ctx.moveTo(centerX, centerY - size);
+      ctx.lineTo(centerX, centerY + size);
+      ctx.stroke();
+    }
+
+    function drawBlank() {
+      drawBackground();
+    }
+
+    function drawGabor(ctx, cx, cy, diameterPx, oriDeg, sfPairs) {
+      const size = Math.max(8, Math.round(diameterPx));
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = size;
+      offCanvas.height = size;
+      const offCtx = offCanvas.getContext('2d');
+      const imageData = offCtx.createImageData(size, size);
+      const data = imageData.data;
+      const radius = size / 2;
+      const orientation = oriDeg * Math.PI / 180;
+      // 条纹换算：sfPairs 表示黑白为一组的可见条纹数量（cycle 数），freq=cycle/D 确保直径方向出现指定组数。
+      const cycles = sfPairs;
+      const freq = cycles / size;
+      const cosOri = Math.cos(orientation);
+      const sinOri = Math.sin(orientation);
+      const sigma = radius * 0.45;
+      const twoSigmaSq = 2 * sigma * sigma;
+      const base = 128;
+      const amplitude = 110;
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const dx = x - radius + 0.5;
+          const dy = y - radius + 0.5;
+          const distSq = dx * dx + dy * dy;
+          const idx = (y * size + x) * 4;
+          if (distSq > radius * radius) {
+            data[idx] = 136;
+            data[idx + 1] = 136;
+            data[idx + 2] = 136;
+            data[idx + 3] = 255;
+            continue;
+          }
+          const rotX = dx * cosOri + dy * sinOri;
+          const sine = Math.cos(2 * Math.PI * freq * rotX);
+          const gaussian = Math.exp(-distSq / twoSigmaSq);
+          const value = clamp(Math.round(base + gaussian * amplitude * sine), 0, 255);
+          data[idx] = value;
+          data[idx + 1] = value;
+          data[idx + 2] = value;
+          data[idx + 3] = 255;
+        }
+      }
+      offCtx.putImageData(imageData, 0, 0);
+      ctx.drawImage(offCanvas, cx - radius, cy - radius);
+      ctx.strokeStyle = '#000';
+      const ratio = window.devicePixelRatio || 1;
+      ctx.lineWidth = Math.max(2, size * 0.03) / ratio;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius - ctx.lineWidth / 2, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    function renderStimulus(sf, ori) {
+      drawBackground();
+      const diameter = Math.min(displayWidth, displayHeight) * 0.36;
+      const centerX = displayWidth / 2;
+      const centerY = displayHeight / 2;
+      drawGabor(ctx, centerX, centerY, diameter, ori, sf);
+    }
+
+    function showFeedback(text, color) {
+      feedbackOverlay.textContent = text;
+      feedbackOverlay.style.color = color;
+      feedbackOverlay.style.opacity = 1;
+    }
+
+    function hideFeedback() {
+      feedbackOverlay.style.opacity = 0;
+    }
+
+    function updateStatus(text) {
+      // Status提示已移除界面，此处仅为兼容保留。
+      if (text) {
+        console.log(text);
+      }
+    }
+
+    function showWaitOverlay(message) {
+      if (!waitOverlay) return;
+      waitOverlayText.textContent = message;
+      waitOverlay.classList.add('visible');
+    }
+
+    function hideWaitOverlay() {
+      if (!waitOverlay) return;
+      waitOverlay.classList.remove('visible');
+    }
+
+    function setExitButtonVisibility(show) {
+      if (!exitButton) return;
+      exitButton.style.display = show ? 'block' : 'none';
+    }
+
+    function forceResolveWaitOverlay() {
+      if (typeof waitOverlayFinish === 'function') {
+        waitOverlayFinish();
+      }
+    }
+
+    // -------------------------
+    // Response handling
+    // -------------------------
+    function waitForResponse() {
+      return new Promise(resolve => {
+        const startTime = performance.now();
+        const timer = setTimeout(() => {
+          if (responseState && responseState.resolve === resolve) {
+            responseState = null;
+          }
+          resolve({ resp: 'NA', rtMs: null, timeout: true, aborted: aborted });
+        }, RESP_LIMIT_MS);
+        responseState = {
+          resolve,
+          timer,
+          startTime
+        };
+      });
+    }
+
+    function clearResponseState() {
+      if (responseState) {
+        clearTimeout(responseState.timer);
+        responseState = null;
+      }
+    }
+
+    function deliverResponse(key) {
+      if (!experimentRunning) return;
+      if (!responseState) return;
+      if (key !== 'a' && key !== 'b') return;
+      clearTimeout(responseState.timer);
+      const now = performance.now();
+      const rtMs = now - responseState.startTime;
+      const resolver = responseState.resolve;
+      responseState = null;
+      resolver({ resp: key, rtMs, timeout: false, aborted: false });
+    }
+
+    function handleKeyDown(event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (experimentRunning && !aborted) {
+          aborted = true;
+          terminateExperimentEarly();
+        }
+        return;
+      }
+      if (!experimentRunning) return;
+      if (!responseState) return;
+      const key = event.key.toLowerCase();
+      deliverResponse(key);
+    }
+
+    document.addEventListener('keydown', handleKeyDown);
+
+    responseButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        const key = btn.getAttribute('data-key');
+        deliverResponse(key);
+      });
+      btn.addEventListener('touchstart', (event) => {
+        event.preventDefault();
+        const key = btn.getAttribute('data-key');
+        deliverResponse(key);
+      }, { passive: false });
+    });
+
+    if (exitButton) {
+      exitButton.addEventListener('click', () => {
+        if (!experimentRunning) return;
+        aborted = true;
+        forceResolveWaitOverlay();
+        terminateExperimentEarly();
+      });
+    }
+
+    function describeTask(task) {
+      return task === 'RB' ? '规则型（RB）任务' : '信息整合（II）任务';
+    }
+
+    function buildTaskIntroMessage(task, orderIndex, totalParts) {
+      const label = describeTask(task);
+      return `第${orderIndex}部分（共${totalParts}部分）：即将开始${label}，请按键盘 A/B 或点击按钮作答。`;
+    }
+
+    function buildRuleChangeMessage(task, orderIndex, totalParts) {
+      const label = describeTask(task);
+      return `提示：规则将发生变化。即将进入第${orderIndex}部分的${label}，请按任意键继续。`;
+    }
+
+    async function waitAnyKey(message) {
+      drawBlank();
+      showWaitOverlay(message);
+      return new Promise(resolve => {
+        let resolved = false;
+
+        const cleanup = () => {
+          document.removeEventListener('keydown', keyHandler, true);
+          document.removeEventListener('pointerdown', pointerHandler, true);
+          waitOverlayButton.removeEventListener('click', buttonHandler, true);
+          waitOverlayButton.removeEventListener('pointerdown', buttonPointerHandler, true);
+          responseButtons.forEach(btn => {
+            btn.removeEventListener('pointerdown', buttonPointerHandler, true);
+          });
+          waitOverlayFinish = null;
+        };
+
+        const finish = () => {
+          if (resolved) return;
+          resolved = true;
+          cleanup();
+          hideWaitOverlay();
+          drawBlank();
+          resolve();
+        };
+
+        waitOverlayFinish = finish;
+
+        const keyHandler = (event) => {
+          const key = event.key ? event.key.toLowerCase() : '';
+          if (key === 'a' || key === 'b' || key === ' ' || key === 'spacebar' || key === 'space') {
+            event.preventDefault();
+            finish();
+          }
+        };
+
+        const pointerHandler = (event) => {
+          event.preventDefault();
+          finish();
+        };
+
+        const buttonPointerHandler = (event) => {
+          event.preventDefault();
+          finish();
+        };
+
+        const buttonHandler = (event) => {
+          event.preventDefault();
+          finish();
+        };
+
+        document.addEventListener('keydown', keyHandler, true);
+        document.addEventListener('pointerdown', pointerHandler, true);
+        waitOverlayButton.addEventListener('click', buttonHandler, true);
+        waitOverlayButton.addEventListener('pointerdown', buttonPointerHandler, true);
+        responseButtons.forEach(btn => {
+          btn.addEventListener('pointerdown', buttonPointerHandler, true);
+        });
+      });
+    }
+
+    // -------------------------
+    // Trial execution
+    // -------------------------
+    async function runBlock(task, trials, orderInSession) {
+      if (!trials || trials.length === 0) return;
+      currentBlockName = trials[0].blockName;
+      const blockIndex = trials[0].blockIndex || 1;
+      const counts = { A: 0, B: 0 };
+      const sfCounts = { 3: 0, 4: 0, 5: 0, 6: 0 };
+      const binCounts = { b1: 0, b2: 0, b3: 0 };
+      let nearCount = 0;
+      let nearA = 0, nearB = 0, farA = 0, farB = 0;
+      let nearSymbolic = 0;
+      trials.forEach(t => {
+        counts[t.label] = (counts[t.label] || 0) + 1;
+        sfCounts[t.sf] = (sfCounts[t.sf] || 0) + 1;
+        const binKey = t.binKey || determineBinKey(t.ori);
+        if (binKey) binCounts[binKey] += 1;
+        if (t.nearFlag) nearCount += 1;
+        if (t.nearFlag && t.symbolicFlag) nearSymbolic += 1;
+        if (t.nearFlag) {
+          if (t.label === 'A') nearA += 1; else nearB += 1;
+        } else {
+          if (t.label === 'A') farA += 1; else farB += 1;
+        }
+      });
+      const nearRatioNum = trials.length ? nearCount / trials.length : 0;
+      const nearRatioStr = task === 'II' ? nearRatioNum.toFixed(3) : '';
+      const symbolicRatioNum = nearCount ? nearSymbolic / nearCount : 0;
+      const qcCountsPayload = {
+        counts: { ...counts },
+        sfCounts: { ...sfCounts },
+        binCounts: { ...binCounts },
+        near: {
+          ratio: Number(nearRatioNum.toFixed(3)),
+          count: nearCount,
+          nearA,
+          nearB,
+          farA,
+          farB,
+          symbolicCount: nearSymbolic,
+          symbolicRatio: Number(symbolicRatioNum.toFixed(3))
+        }
+      };
+      const qcCountsJson = JSON.stringify(qcCountsPayload);
+      console.log(`QC ${currentBlockName}: A=${counts.A}, B=${counts.B}, sf3=${sfCounts[3]}, sf4=${sfCounts[4]}, sf5=${sfCounts[5]}, sf6=${sfCounts[6]}, bin1=${binCounts.b1}, bin2=${binCounts.b2}, bin3=${binCounts.b3}, near=${nearRatioNum.toFixed(3)}, nearA=${nearA}, nearB=${nearB}, farA=${farA}, farB=${farB}, nearSymbolic=${nearSymbolic}`);
+      for (let i = 0; i < trials.length; i++) {
+        if (aborted) break;
+        const trial = trials[i];
+        const trialStartUTC = new Date().toISOString();
+        if (USE_FIXATION) {
+          drawFixation();
+          await wait(FIX_MS);
+          if (aborted) break;
+        }
+        if (USE_PREBLANK) {
+          drawBlank();
+          await wait(PREBLANK_MS);
+          if (aborted) break;
+        }
+        renderStimulus(trial.sf, trial.ori);
+        const response = await waitForResponse();
+        clearResponseState();
+        drawBlank();
+        if (participantMeta.delayMs > 0) {
+          drawFixation();
+          await wait(participantMeta.delayMs);
+          if (aborted) break;
+          drawBlank();
+        }
+        if (response.aborted || aborted) {
+          break;
+        }
+        let rtSec = '';
+        let respKey = response.resp;
+        if (!response.timeout && response.rtMs != null) {
+          rtSec = (response.rtMs / 1000).toFixed(3);
+        }
+        if (response.timeout) {
+          respKey = 'NA';
+        }
+        const corr = respKey === trial.correctKey ? 1 : 0;
+        showFeedback(corr ? 'Right' : 'Wrong', corr ? '#2ecc71' : '#e74c3c');
+        await wait(FEEDBACK_MS);
+        hideFeedback();
+        if (aborted) break;
+        dataRows.push([
+          participantId,
+          participantMeta.group,
+          participantMeta.orderCode,
+          participantMeta.serial,
+          participantMeta.sessionIndex,
+          participantMeta.movement,
+          task,
+          trial.iiStructure || '',
+          orderInSession,
+          trial.blockName,
+          blockIndex,
+          trial.trialIndex,
+          trial.sf,
+          trial.ori.toFixed(3),
+          trial.nearFlag,
+          trial.label,
+          trial.correctKey,
+          respKey,
+          corr,
+          rtSec,
+          participantMeta.delayMs,
+          trialStartUTC,
+          nearRatioStr,
+          qcCountsJson
+        ]);
+      }
+    }
+
+    // -------------------------
+    // Experiment control
+    // -------------------------
+    async function startExperiment() {
+      experimentRunning = true;
+      aborted = false;
+      setExitButtonVisibility(true);
+      dataRows = [];
+      resizeCanvas();
+      window.addEventListener('resize', resizeCanvas);
+      let rbBlocks = [];
+      let iiBlocks = [];
+      try {
+        rbBlocks = makeTrialsRB_balancedV3(participantId, sessionConfig.rbRule);
+        iiBlocks = makeTrialsII_balancedV3(participantId, sessionConfig.iiPlan);
+        const needsRB = participantMeta.taskOrder.includes('RB');
+        const needsII = participantMeta.taskOrder.includes('II');
+        if (needsRB && (!rbBlocks || !rbBlocks.length)) {
+          throw new Error('RB 刺激集合为空');
+        }
+        if (needsII && (!iiBlocks || !iiBlocks.length)) {
+          throw new Error('II 刺激集合为空');
+        }
+      } catch (err) {
+        console.error('试次生成失败', err);
+        alert(`试次生成失败：${err && err.message ? err.message : err}`);
+        experimentRunning = false;
+        setExitButtonVisibility(false);
+        forceResolveWaitOverlay();
+        hideWaitOverlay();
+        startScreen.style.display = 'flex';
+        experimentContainer.style.display = 'none';
+        return;
+      }
+      const blockStore = { RB: rbBlocks, II: iiBlocks };
+      const totalTasks = participantMeta.taskOrder.length;
+      for (let t = 0; t < totalTasks; t++) {
+        const task = participantMeta.taskOrder[t];
+        const blocks = blockStore[task] || [];
+        if (!blocks.length) {
+          console.warn('未找到任务区块', { task });
+          continue;
+        }
+        if (t === 0) {
+          await waitAnyKey(buildTaskIntroMessage(task, t + 1, totalTasks));
+          if (aborted) break;
+        } else {
+          const prevTask = participantMeta.taskOrder[t - 1];
+          if (task !== prevTask) {
+            await waitAnyKey(buildRuleChangeMessage(task, t + 1, totalTasks));
+            if (aborted) break;
+          }
+        }
+        for (let b = 0; b < blocks.length; b++) {
+          if (aborted) break;
+          await runBlock(task, blocks[b], t + 1);
+        }
+        if (aborted) break;
+      }
+      if (!aborted) {
+        concludeExperiment();
+      }
+    }
+
+    function buildCSVContent(rows) {
+      const allRows = [CSV_HEADER.join(',')];
+      for (const row of rows) {
+        const formatted = row.map(value => {
+          if (value === null || value === undefined) return '';
+          const str = String(value);
+          if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+            return '"' + str.replace(/"/g, '""') + '"';
+          }
+          return str;
+        }).join(',');
+        allRows.push(formatted);
+      }
+      return allRows.join('\n');
+    }
+
+    function downloadCSV(filename, rows) {
+      if (pendingDownload) return;
+      const csvContent = buildCSVContent(rows);
+      const blob = new Blob([csvContent], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+      pendingDownload = true;
+    }
+
+    function concludeExperiment() {
+      experimentRunning = false;
+      setExitButtonVisibility(false);
+      forceResolveWaitOverlay();
+      hideWaitOverlay();
+      updateStatus('实验完成，CSV 已自动下载。');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `gabor_${participantId || 'anon'}_${timestamp}.csv`;
+      downloadCSV(filename, dataRows);
+      showCompletionMessage();
+    }
+
+    function terminateExperimentEarly() {
+      if (!experimentRunning) return;
+      clearResponseState();
+      experimentRunning = false;
+      setExitButtonVisibility(false);
+      forceResolveWaitOverlay();
+      hideWaitOverlay();
+      updateStatus('实验已中止，CSV 已自动下载。');
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const filename = `gabor_${participantId || 'anon'}_${timestamp}.csv`;
+      downloadCSV(filename, dataRows);
+      showCompletionMessage();
+    }
+
+    function showCompletionMessage() {
+      hideFeedback();
+      drawBlank();
+      ctx.fillStyle = '#fff';
+      ctx.font = '28px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('感谢参与实验！', displayWidth / 2, displayHeight / 2);
+    }
+
+    function resetState() {
+      aborted = false;
+      pendingDownload = false;
+      setExitButtonVisibility(false);
+      forceResolveWaitOverlay();
+      hideWaitOverlay();
+    }
+
+    async function handleStart() {
+      participantId = participantInput.value.trim();
+      if (!participantId) {
+        alert('请输入被试编号。');
+        return;
+      }
+      const sessionIndex = requestSessionIndex();
+      if (!sessionIndex) {
+        alert('请先选择本次场次（1 或 2）。');
+        return;
+      }
+      resetState();
+      participantMeta = parseIdV2(participantId, sessionIndex);
+      if (!participantMeta) {
+        alert('编号格式应为字母 A/B + 1~4 的编号 + 至少一位序号，例如 A11、B204。');
+        return;
+      }
+      sessionConfig = sessionParams(participantMeta.sessionIndex);
+      console.log(`ID 解析: group=${participantMeta.group}, orderCode=${participantMeta.orderCode}, serial=${participantMeta.serial}, session=${participantMeta.sessionIndex}, movement=${participantMeta.movement}, taskOrder=${participantMeta.taskOrder.join('>')}, delayMs=${participantMeta.delayMs}`);
+      const iiFormulaSummary = (sessionConfig.iiPlan || []).map(entry => {
+        const structure = getIIStructureConfig(entry.key);
+        return formatIIStructureFormula(structure);
+      }).join(' | ');
+      console.log(`II 判定公式：${iiFormulaSummary}`);
+      startScreen.style.display = 'none';
+      experimentContainer.style.display = 'flex';
+      updateStatus('正在尝试进入全屏模式...');
+      try {
+        if (document.fullscreenEnabled) {
+          await document.documentElement.requestFullscreen();
+        }
+      } catch (err) {
+        console.warn('Fullscreen request failed:', err);
+      }
+      await wait(100);
+      updateStatus('正在准备试次，请稍候...');
+      startExperiment();
+    }
+
+    startButton.addEventListener('click', handleStart);
+
+    document.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement && experimentRunning && !aborted) {
+        // If participant exits fullscreen manually, continue but note in status.
+        updateStatus('已退出全屏，实验仍将继续。');
+      }
+    });
+
+    window.addEventListener('load', () => {
+      resizeCanvas();
+      drawBlank();
+    });
+  </script>
+</body>
+</html>
