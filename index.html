@@ -446,7 +446,7 @@
       return summary;
     }
 
-    function checkSfBinLabelBalance(trials) {
+    function checkSfBinLabelBalance(trials, structure) {
       const comboMap = new Map();
       trials.forEach(trial => {
         const binKey = trial.binKey || determineBinKey(trial.ori);
@@ -459,12 +459,27 @@
         if (trial.label === 'A') stats.countA += 1; else stats.countB += 1;
       });
       let maxDiff = 0;
-      for (const stats of comboMap.values()) {
-        if (stats.total === 0) continue;
-        const diff = Math.abs(stats.countA - stats.countB);
-        if (diff > maxDiff) maxDiff = diff;
+      let ok = true;
+      for (const sf of SF_LINES) {
+        for (const binKey of II_BIN_KEYS) {
+          const key = `${sf}_${binKey}`;
+          const stats = comboMap.get(key) || { total: 0, countA: 0, countB: 0 };
+          const feasibleA = structure ? isLabelFeasible(structure, sf, binKey, 'A') : true;
+          const feasibleB = structure ? isLabelFeasible(structure, sf, binKey, 'B') : true;
+          if (feasibleA && feasibleB) {
+            const diff = Math.abs(stats.countA - stats.countB);
+            if (diff > 0 || stats.total === 0) ok = false;
+            if (diff > maxDiff) maxDiff = diff;
+          } else if (feasibleA && !feasibleB) {
+            if (stats.countB > 0) ok = false;
+          } else if (!feasibleA && feasibleB) {
+            if (stats.countA > 0) ok = false;
+          } else if (stats.total > 0) {
+            ok = false;
+          }
+        }
       }
-      return maxDiff;
+      return { ok, imbalance: maxDiff };
     }
 
     function isLabelFeasible(structure, sf, binKey, targetLabel) {
@@ -490,14 +505,14 @@
       const perSfLabel = (48 / SF_LINES.length) / 2;
       const perBinLabel = (48 / II_BIN_KEYS.length) / 2;
       const feasibleMap = {};
+      const infeasiblePairs = [];
       for (const label of II_LABELS) {
         feasibleMap[label] = {};
         for (const sf of SF_LINES) {
           const feasibleBins = II_BIN_KEYS.filter(binKey => isLabelFeasible(structure, sf, binKey, label));
           feasibleMap[label][sf] = feasibleBins;
           if (!feasibleBins.length) {
-            console.warn('II alloc impossible for label/sf pair', { structure: structure.key, label, sf });
-            return null;
+            infeasiblePairs.push({ label, sf });
           }
         }
       }
@@ -505,10 +520,29 @@
       for (const label of II_LABELS) {
         for (const sf of SF_LINES) {
           const options = feasibleMap[label][sf];
+          if (!options.length) continue;
           for (let i = 0; i < perSfLabel; i++) {
-            queue.push({ label, sf, options });
+            queue.push({ label, sf, options: options.slice() });
           }
         }
+      }
+      if (!queue.length) {
+        console.error('II alloc failed：没有可行的 label/sf 组合', { structure: structure.key });
+        return null;
+      }
+      if (queue.length < 48) {
+        const deficit = 48 - queue.length;
+        console.warn('II alloc shortfall due to infeasible combos，自动补齐', {
+          structure: structure.key,
+          deficit,
+          infeasiblePairs
+        });
+        const clones = [];
+        for (let i = 0; i < deficit; i++) {
+          const src = queue[i % queue.length];
+          clones.push({ label: src.label, sf: src.sf, options: src.options.slice() });
+        }
+        queue.push(...clones);
       }
       queue.sort((a, b) => {
         if (a.options.length !== b.options.length) {
@@ -883,8 +917,9 @@
           const subset = blockTrials.filter(t => t.binKey === binKey);
           return subset.length > 0 && subset.filter(t => t.label === 'A').length === subset.length / 2;
         });
-        const comboImbalance = checkSfBinLabelBalance(blockTrials);
-        const comboBalanceOk = comboImbalance <= 2;
+        const comboCheck = checkSfBinLabelBalance(blockTrials, structure);
+        const comboBalanceOk = comboCheck.ok;
+        const comboImbalance = comboCheck.imbalance;
         const nearRatioOk = summary.nearRatio >= II_NEAR_LOWER && summary.nearRatio <= II_NEAR_UPPER;
         const nearBalanceOk = summary.nearA === summary.nearB && summary.farA === summary.farB;
         const symbolicOk = summary.nearSymbolicRatio >= II_NEAR_SYMBOLIC_MIN_RATIO;
@@ -1202,8 +1237,6 @@
     if (exitButton) {
       exitButton.addEventListener('click', () => {
         if (!experimentRunning) return;
-        const confirmExit = confirm('确定要退出实验并导出当前数据吗？');
-        if (!confirmExit) return;
         aborted = true;
         forceResolveWaitOverlay();
         terminateExperimentEarly();
@@ -1402,15 +1435,17 @@
       for (let t = 0; t < participantMeta.taskOrder.length; t++) {
         const task = participantMeta.taskOrder[t];
         const blocks = blockStore[task] || [];
+        let ranBlock = false;
         for (let b = 0; b < blocks.length; b++) {
           if (aborted) break;
           await runBlock(task, blocks[b], t + 1);
+          ranBlock = true;
         }
         if (aborted) break;
         // Updated the block-loop transition logic so the “规则将发生变化”提示 now
         // appears whenever the task order switches between RB and II, covering both
         // RB→II and II→RB transitions as required.
-        if (t < participantMeta.taskOrder.length - 1) {
+        if (ranBlock && t < participantMeta.taskOrder.length - 1) {
           const nextTask = participantMeta.taskOrder[t + 1];
           if (nextTask && nextTask !== task) {
             await waitAnyKey('提示：接下来规则将发生变化，请按任意键继续。');
