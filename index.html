@@ -174,17 +174,20 @@
     // -------------------------
     // Configurable constants (do not mutate elsewhere)
     // -------------------------
-    const N_RB = 200;
-    const N_II = 240;
+    const N_RB = 200; // 5 blocks × 40 train trials
+    const N_II = 200; // 5 blocks × 40 train trials per II structure
+
+    const RB_GEN_COUNT = 40;
+    const II_GEN_COUNT = 40;
 
     const USE_FIXATION = true,  FIX_MS = 500;
     const USE_PREBLANK = false, PREBLANK_MS = 0;
     const RESP_LIMIT_MS = 3000;
     const FEEDBACK_MS   = 500;
 
-    const FIXED_SF_RANGE = { min: 3, max: 8 };
-    const FIXED_ORI_RANGE = { min: -30, max: 30 };
-    const FIXED_SF_LEVELS = [3, 4, 5, 6, 7, 8];
+    const FIXED_SF_RANGE = { min: 3, max: 6 };
+    const FIXED_ORI_RANGE = { min: -15, max: 15 };
+    const FIXED_SF_LEVELS = [3, 4, 5, 6];
 
     let activeSfRange = { ...FIXED_SF_RANGE };
     let activeOriRange = { ...FIXED_ORI_RANGE };
@@ -196,6 +199,16 @@
     let rbSfThreshold = 4.5;
 
     let dynamicBinRanges = null;
+
+    // 固定预生成的刺激池：每个被试都复用同一套 train/gen 列表
+    let STIM_RB1_TRAIN = [];
+    let STIM_RB2_TRAIN = [];
+    let STIM_II1_TRAIN = [];
+    let STIM_II2_TRAIN = [];
+    let STIM_RB1_GEN = [];
+    let STIM_RB2_GEN = [];
+    let STIM_II1_GEN = [];
+    let STIM_II2_GEN = [];
 
     function buildBinRangesFromOri(range) {
       const absMax = Math.abs(range.max);
@@ -308,20 +321,19 @@
       1: {
         structureKey: 'II1',
         classes: {
-          A: { mean: [-0.85, 0], cov: [[0.60, 0.32], [0.32, 0.95]] },
-          B: { mean: [0.85, 0], cov: [[0.60, 0.32], [0.32, 0.95]] }
+          A: { mean: [-0.95, 0.35], cov: [[0.55, 0.18], [0.18, 0.45]] },
+          B: { mean: [0.95, -0.35], cov: [[0.55, 0.18], [0.18, 0.45]] }
         }
       },
       2: {
         structureKey: 'II2',
         classes: {
-          A: { mean: [-0.85, 0], cov: [[0.60, -0.32], [-0.32, 0.95]] },
-          B: { mean: [0.85, 0], cov: [[0.60, -0.32], [-0.32, 0.95]] }
+          A: { mean: [-0.95, -0.35], cov: [[0.55, -0.18], [-0.18, 0.45]] },
+          B: { mean: [0.95, 0.35], cov: [[0.55, -0.18], [-0.18, 0.45]] }
         }
       }
     };
-    // 上述高斯在初始化后得出的线性判定公式示例：
-    // II1: score ≈ w_sf * x + w_ori * y + c，其中 |w_sf| > |w_ori| (约 3:1)；II2 在 y 项上取反。
+    // 初始化后将打印线性判别式，示例：score = w_sf * x + w_ori * y + c，其中 |w_sf| > |w_ori|，II2 的 y 项符号相反以形成镜像结构。
 
     function initializeGaussianBoundaries() {
       Object.values(II_GAUSS_PARAMS).forEach(cfg => {
@@ -330,6 +342,7 @@
         if (cfg.structureKey && II_STRUCTURES_LIBRARY[cfg.structureKey]) {
           II_STRUCTURES_LIBRARY[cfg.structureKey].boundary = boundary;
         }
+        console.log(`Bayes boundary ${cfg.structureKey || ''}: score = ${boundary.w1.toFixed(2)}*x + ${boundary.w2.toFixed(2)}*y + ${boundary.c.toFixed(2)}`);
       });
     }
 
@@ -802,10 +815,34 @@
       return null;
     }
 
+    const ORI_MAG_MIN = 3;
+
+    function mapLatentToPhysicalSf(latentX) {
+      return clamp(
+        linearMap(latentX, LATENT_RANGE.xMin, LATENT_RANGE.xMax, activeSfRange.min, activeSfRange.max),
+        activeSfRange.min,
+        activeSfRange.max
+      );
+    }
+
+    function mapLatentToPhysicalOriMagnitude(latentY) {
+      const absLatent = Math.abs(latentY);
+      return clamp(
+        linearMap(absLatent, LATENT_RANGE.yMin, LATENT_RANGE.yMax, ORI_MAG_MIN, Math.abs(activeOriRange.max)),
+        ORI_MAG_MIN,
+        Math.abs(activeOriRange.max)
+      );
+    }
+
     function mapLatentToPhysical(x, y) {
-      const sf = clamp(linearMap(x, LATENT_RANGE.xMin, LATENT_RANGE.xMax, activeSfRange.min, activeSfRange.max), activeSfRange.min, activeSfRange.max);
-      const ori = clamp(linearMap(y, LATENT_RANGE.yMin, LATENT_RANGE.yMax, activeOriRange.min, activeOriRange.max), activeOriRange.min, activeOriRange.max);
-      return { sf, ori };
+      return {
+        sf: mapLatentToPhysicalSf(x),
+        ori: clamp(
+          linearMap(y, LATENT_RANGE.yMin, LATENT_RANGE.yMax, activeOriRange.min, activeOriRange.max),
+          activeOriRange.min,
+          activeOriRange.max
+        )
+      };
     }
 
     function mapPhysicalSfToLatent(sfValue) {
@@ -817,8 +854,9 @@
     }
 
     function mapPhysicalOriToLatent(oriValue) {
+      const absOri = Math.abs(oriValue);
       return clamp(
-        linearMap(oriValue, activeOriRange.min, activeOriRange.max, LATENT_RANGE.yMin, LATENT_RANGE.yMax),
+        linearMap(absOri, 0, Math.abs(activeOriRange.max), LATENT_RANGE.yMin, LATENT_RANGE.yMax),
         LATENT_RANGE.yMin,
         LATENT_RANGE.yMax
       );
@@ -838,11 +876,40 @@
       return best;
     }
 
-    function createStimulusFromLatent(latentPoint) {
-      const mapped = mapLatentToPhysical(latentPoint[0], latentPoint[1]);
+    function sampleStimulusFromGaussian(classCfg, rng) {
+      const latent = sampleLatentPoint(classCfg, rng);
+      if (!latent) return null;
+      const sfValue = quantizeSfLines(mapLatentToPhysicalSf(latent[0]));
+      const oriMag = mapLatentToPhysicalOriMagnitude(latent[1]);
+      const sign = rng() < 0.5 ? -1 : 1;
+      const oriValue = Number((sign * oriMag).toFixed(3));
+      return { sf: sfValue, ori: oriValue, latentX: latent[0], latentY: latent[1] };
+    }
+
+    function deterministicShuffle(list, seed) {
+      const copy = list.map(item => ({ ...item }));
+      shuffleInPlace(copy, hashString(seed));
+      return copy;
+    }
+
+    function computeIIDistance(latentX, latentY, boundary) {
+      if (!boundary) return { score: 0, distance: 0 };
+      const absY = Math.abs(latentY);
+      const score = boundary.w1 * latentX + boundary.w2 * absY + boundary.c;
+      const distance = Math.abs(score) / (boundary.norm || 1);
+      return { score, distance };
+    }
+
+    function buildTrialFromStimulus(base, extras = {}) {
       return {
-        sf: quantizeSfLines(mapped.sf),
-        ori: Number(mapped.ori.toFixed(3))
+        sf: base.sf,
+        ori: Number(Number(base.ori).toFixed(3)),
+        label: base.label,
+        catType: extras.catType || '',
+        phase: extras.phase || 'train',
+        iiStructure: extras.iiStructure || '',
+        nearFlag: extras.nearFlag || 0,
+        symbolicFlag: extras.symbolicFlag || 0
       };
     }
 
@@ -860,303 +927,203 @@
       }
     }
 
-    function generateGaussianRBBlocks(sessionIndex) {
-      const config = RB_GAUSS_PARAMS[sessionIndex];
-      if (!config) return [];
-      const rng = hashString(`GAUSS_RB_SESSION${sessionIndex}`);
-      const rule = sessionIndex === 1 ? 'ORI_NEAR_A' : 'ORI_NEAR_B';
-      const perLabel = N_RB / 2;
-      const labelCounts = { A: 0, B: 0 };
+    function fillRBPhase(config, ruleKey, catType, phase, totalCount, rng, seenKeys) {
+      const perLabel = totalCount / 2;
+      const counts = { A: 0, B: 0 };
       const trials = [];
-      const guardLimit = N_RB * 400;
+      const guardLimit = totalCount * 800;
       let guard = 0;
-      while ((labelCounts.A < perLabel || labelCounts.B < perLabel) && guard < guardLimit) {
+      while ((counts.A < perLabel || counts.B < perLabel) && guard < guardLimit) {
         guard += 1;
-        const targetLabel = labelCounts.A < perLabel ? 'A' : 'B';
-        const classCfg = config.classes[targetLabel];
+        const desiredLabel = counts.A < perLabel ? 'A' : 'B';
+        const classCfg = config.classes[desiredLabel];
         if (!classCfg) break;
-        const latent = sampleLatentPoint(classCfg, rng);
-        if (!latent) continue;
-        const stim = createStimulusFromLatent(latent);
-        if (rule === 'ORI_NEAR_A' || rule === 'ORI_NEAR_B') {
-          const magnitude = Math.abs(stim.ori);
-          const signed = clamp(Math.max(1, magnitude) * (rng() < 0.5 ? -1 : 1), activeOriRange.min, activeOriRange.max);
-          stim.ori = Number(signed.toFixed(3));
+        const sample = sampleStimulusFromGaussian(classCfg, rng);
+        if (!sample) continue;
+        const actualLabel = labelRB(sample.sf, sample.ori, ruleKey);
+        if (counts[actualLabel] >= perLabel) continue;
+        const key = `${sample.sf}_${sample.ori.toFixed(3)}`;
+        if (phase === 'gen' && seenKeys && seenKeys.has(key)) continue;
+        const trial = buildTrialFromStimulus(
+          { sf: sample.sf, ori: sample.ori, label: actualLabel },
+          { catType, phase, nearFlag: 0 }
+        );
+        trials.push(trial);
+        counts[actualLabel] += 1;
+        if (seenKeys) seenKeys.add(key);
+      }
+      if (counts.A < perLabel || counts.B < perLabel) {
+        console.warn('RB 阶段样本不足，复制补齐', { catType, phase, counts });
+        const templateA = trials.filter(t => t.label === 'A');
+        const templateB = trials.filter(t => t.label === 'B');
+        while (counts.A < perLabel && templateA.length) {
+          trials.push({ ...templateA[counts.A % templateA.length], phase });
+          counts.A += 1;
         }
-        const finalLabel = labelRB(stim.sf, stim.ori, rule);
-        if (finalLabel !== targetLabel) continue;
-        trials.push({
-          sf: stim.sf,
-          ori: stim.ori,
-          binKey: determineBinKey(stim.ori),
-          nearFlag: 0,
-          symbolicFlag: 0,
-          iiStructure: '',
-          label: finalLabel,
-          correctKey: finalLabel === 'A' ? 'a' : 'b'
-        });
-        labelCounts[targetLabel] += 1;
+        while (counts.B < perLabel && templateB.length) {
+          trials.push({ ...templateB[counts.B % templateB.length], phase });
+          counts.B += 1;
+        }
       }
-      if (trials.length < N_RB) {
-        console.warn('RB Gaussian 采样不足，使用模板补齐', { sessionIndex, collected: trials.length });
-        ensureTrialCount(trials, N_RB);
+      return deterministicShuffle(trials, `${catType}_${phase}_shuffle`);
+    }
+
+    function generateRBStimulusSet(sessionIndex, catType, ruleKey, seed) {
+      const config = RB_GAUSS_PARAMS[sessionIndex];
+      if (!config) return { train: [], gen: [] };
+      const rngTrain = hashString(`${catType}_${seed}_train`);
+      const seenKeys = new Set();
+      const train = fillRBPhase(config, ruleKey, catType, 'train', N_RB, rngTrain, seenKeys);
+      const rngGen = hashString(`${catType}_${seed}_gen`);
+      const gen = fillRBPhase(config, ruleKey, catType, 'gen', RB_GEN_COUNT, rngGen, seenKeys);
+      return { train, gen };
+    }
+
+    function fillIIPhase(config, catType, structureKey, phase, totalCount, rng) {
+      const perLabel = totalCount / 2;
+      const counts = { A: 0, B: 0 };
+      const trials = [];
+      const guardLimit = totalCount * 1000;
+      let guard = 0;
+      while ((counts.A < perLabel || counts.B < perLabel) && guard < guardLimit) {
+        guard += 1;
+        const desiredLabel = counts.A < perLabel ? 'A' : 'B';
+        const classCfg = config.classes[desiredLabel];
+        if (!classCfg) break;
+        const sample = sampleStimulusFromGaussian(classCfg, rng);
+        if (!sample) continue;
+        const decision = bayesDecision(sample.latentX, Math.abs(sample.latentY), config.boundary);
+        if (counts[decision] >= perLabel) continue;
+        const distInfo = computeIIDistance(sample.latentX, sample.latentY, config.boundary);
+        const trial = buildTrialFromStimulus(
+          { sf: sample.sf, ori: sample.ori, label: decision },
+          {
+            catType,
+            phase,
+            iiStructure: config.structureKey,
+            nearFlag: distInfo.distance <= 0.5 ? 1 : 0,
+            symbolicFlag: 0
+          }
+        );
+        trials.push(trial);
+        counts[decision] += 1;
       }
-      shuffleInPlace(trials, hashString(`GAUSS_RB_SESSION${sessionIndex}_globalShuffle`));
+      if (counts.A < perLabel || counts.B < perLabel) {
+        console.warn('II 阶段样本不足，复制补齐', { catType, phase, counts });
+        const templateA = trials.filter(t => t.label === 'A');
+        const templateB = trials.filter(t => t.label === 'B');
+        while (counts.A < perLabel && templateA.length) {
+          trials.push({ ...templateA[counts.A % templateA.length], phase });
+          counts.A += 1;
+        }
+        while (counts.B < perLabel && templateB.length) {
+          trials.push({ ...templateB[counts.B % templateB.length], phase });
+          counts.B += 1;
+        }
+      }
+      return deterministicShuffle(trials, `${catType}_${phase}_shuffle`);
+    }
+
+    function generateIIStimulusSet(sessionIndex, catType, seed) {
+      const config = II_GAUSS_PARAMS[sessionIndex];
+      if (!config) return { train: [], gen: [], heuristics: null };
+      let bestCandidate = null;
+      let bestHeuristic = Infinity;
+      let bestDetails = null;
+      for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
+        const train = fillIIPhase(config, catType, config.structureKey, 'train', N_II, hashString(`${catType}_${seed}_train_${attempt}`));
+        const heuristics = evaluateSingleDimHeuristics(train);
+        const singleAcc = Math.max(heuristics.sfAccuracy, heuristics.oriAccuracy);
+        if (
+          singleAcc <= II_SINGLE_DIM_MAX_ACCURACY &&
+          heuristics.sfAccuracy <= II_SINGLE_DIM_MAX_ACCURACY &&
+          heuristics.oriAccuracy <= II_SINGLE_DIM_MAX_ACCURACY
+        ) {
+          const gen = fillIIPhase(config, catType, config.structureKey, 'gen', II_GEN_COUNT, hashString(`${catType}_${seed}_gen_${attempt}`));
+          return { train, gen, heuristics };
+        }
+        if (singleAcc < bestHeuristic) {
+          bestCandidate = train;
+          bestHeuristic = singleAcc;
+          bestDetails = heuristics;
+        }
+      }
+      console.warn(
+        `II ${catType}: 未在 ${II_MAX_PLAN_ATTEMPTS} 次内满足单维≤${II_SINGLE_DIM_MAX_ACCURACY}，使用最佳候选`,
+        bestDetails
+      );
+      const fallbackGen = fillIIPhase(config, catType, config.structureKey, 'gen', II_GEN_COUNT, hashString(`${catType}_${seed}_gen_fallback`));
+      return { train: bestCandidate || [], gen: fallbackGen, heuristics: bestDetails };
+    }
+
+    function chunkStimuliForBlocks(stimuli, blockSize, prefix, seedPrefix) {
+      const shuffled = deterministicShuffle(stimuli, `${seedPrefix}_${prefix}_full`);
+      const blockCount = Math.floor(shuffled.length / blockSize);
       const blocks = [];
-      for (let blockIdx = 0; blockIdx < RB_BLOCK_COUNT; blockIdx++) {
-        const slice = trials.slice(blockIdx * RB_TRIALS_PER_BLOCK, (blockIdx + 1) * RB_TRIALS_PER_BLOCK);
-        const annotated = slice.map((trial, idx) => ({
+      for (let i = 0; i < blockCount; i++) {
+        const start = i * blockSize;
+        const chunk = shuffled.slice(start, start + blockSize).map(trial => ({
           ...trial,
-          blockName: `RB-${blockIdx + 1}`,
-          blockIndex: blockIdx + 1,
-          trialIndex: idx + 1
+          blockName: `${prefix}-${i + 1}`,
+          blockIndex: i + 1
         }));
-        const shuffled = shuffleBlockTrials(annotated, `GAUSS_RB_SESSION${sessionIndex}_block${blockIdx}`);
-        blocks.push(shuffled);
+        const ordered = prefix === 'II'
+          ? shuffleIIBlockTrialsWithAntiStreak(chunk, `${seedPrefix}_${prefix}_blk${i}`)
+          : shuffleBlockTrials(chunk, `${seedPrefix}_${prefix}_blk${i}`);
+        ordered.forEach((trial, idx) => {
+          trial.correctKey = trial.label === 'A' ? 'a' : 'b';
+          trial.binKey = determineBinKey(trial.ori);
+          trial.trialIndex = idx + 1;
+        });
+        blocks.push(ordered);
       }
       return blocks;
     }
 
-    function buildSfLayerPool(sfValue, targetPerLabel, structure, rng) {
-      const absOriMax = Math.abs(activeOriRange.max);
-      const pools = { A: [], B: [] };
-      const counts = { A: 0, B: 0 };
-      const trials = [];
-      const guardLimit = targetPerLabel * 2000;
-      let guard = 0;
-      while ((counts.A < targetPerLabel || counts.B < targetPerLabel) && guard < guardLimit) {
-        guard += 1;
-        const absOri = Number((rng() * absOriMax).toFixed(3));
-        const projection = computeIIProjection(sfValue, absOri, structure);
-        const label = projection.raw >= 0 ? 'A' : 'B';
-        if (counts[label] >= targetPerLabel) continue;
-        const entry = {
-          sf: sfValue,
-          oriAbs: absOri,
-          label,
-          iiStructure: structure.key
-        };
-        pools[label].push(entry);
-        trials.push(entry);
-        counts[label] += 1;
-      }
-      ['A', 'B'].forEach(label => {
-        if (counts[label] >= targetPerLabel) return;
-        const pool = pools[label];
-        if (!pool.length) return;
-        while (counts[label] < targetPerLabel) {
-          const template = pool[Math.floor(rng() * pool.length)];
-          const clone = { ...template };
-          trials.push(clone);
-          pools[label].push(clone);
-          counts[label] += 1;
-        }
-      });
-      const complete = counts.A >= targetPerLabel && counts.B >= targetPerLabel;
-      return { trials: complete ? trials : [], complete };
-    }
-
-    function finalizeSfLayerTrials(trials, structure, rng) {
-      if (!trials.length) return [];
-      const total = trials.length;
-      const signs = new Array(total).fill(1);
-      const negatives = Math.floor(total / 2);
-      for (let i = 0; i < negatives; i++) {
-        signs[i] = -1;
-      }
-      shuffleInPlace(signs, rng);
-      return trials.map((trial, idx) => {
-        const signedOri = clamp(trial.oriAbs * signs[idx], activeOriRange.min, activeOriRange.max);
-        const finalOri = Number(signedOri.toFixed(3));
-        const projection = computeIIProjection(trial.sf, finalOri, structure);
-        const dist = Math.abs(projection.raw) / (projection.norm || 1);
-        return {
-          sf: trial.sf,
-          ori: finalOri,
-          binKey: determineBinKey(finalOri),
-          nearFlag: dist <= 0.5 ? 1 : 0,
-          symbolicFlag: (Math.sign(projection.x) !== 0 && Math.sign(projection.x) === Math.sign(projection.y)) ? 1 : 0,
-          iiStructure: structure.key,
-          label: trial.label,
-          correctKey: trial.label === 'A' ? 'a' : 'b'
-        };
-      });
-    }
-
-    function interleaveSfLayers(sfLevels, layerMap) {
-      const iterators = sfLevels.map(sf => ({ sf, list: layerMap.get(sf) || [], index: 0 }));
-      const total = iterators.reduce((sum, item) => sum + item.list.length, 0);
-      const merged = [];
-      while (merged.length < total) {
-        let advanced = false;
-        for (const item of iterators) {
-          if (item.index < item.list.length) {
-            merged.push({ ...item.list[item.index] });
-            item.index += 1;
-            advanced = true;
-            if (merged.length === total) break;
-          }
-        }
-        if (!advanced) break;
-      }
-      return merged;
-    }
-
-    function analyzeOriBucketBalance(trials) {
-      if (!dynamicBinRanges || !trials || !trials.length) {
-        return { ok: true, buckets: {}, reasons: [] };
-      }
-      const bucketStats = {};
-      II_BIN_KEYS.forEach(key => {
-        bucketStats[key] = { total: 0, A: 0, B: 0 };
-      });
-      const classify = absOri => {
-        if (absOri <= dynamicBinRanges.b1.max) return 'b1';
-        if (absOri <= dynamicBinRanges.b2.max) return 'b2';
-        if (absOri <= dynamicBinRanges.b3.max + 1e-6) return 'b3';
-        return null;
-      };
-      trials.forEach(trial => {
-        const absOri = Math.abs(trial.ori);
-        const bucket = classify(absOri);
-        if (!bucket || !bucketStats[bucket]) return;
-        const stats = bucketStats[bucket];
-        stats.total += 1;
-        stats[trial.label] += 1;
-      });
-      const reasons = [];
-      let ok = true;
-      II_BIN_KEYS.forEach(key => {
-        const stats = bucketStats[key];
-        if (!stats || stats.total === 0) {
-          ok = false;
-          reasons.push(`${key}:0`);
-          return;
-        }
-        if (stats.A < II_ORI_BUCKET_MIN_PER_LABEL || stats.B < II_ORI_BUCKET_MIN_PER_LABEL) {
-          ok = false;
-          reasons.push(`${key}:A${stats.A}_B${stats.B}`);
-        }
-      });
-      return { ok, buckets: bucketStats, reasons };
-    }
-
-    function generateGaussianIIBlocks(sessionIndex) {
-      const config = II_GAUSS_PARAMS[sessionIndex];
-      if (!config) return { blocks: [], heuristic: 1, passed: false };
-      const structure = getIIStructureConfig(config.structureKey);
-      if (!structure) return { blocks: [], heuristic: 1, passed: false };
-      const sfLevels = getActiveSfLevels();
-      const perSfTotal = Math.round(N_II / sfLevels.length);
-      const perSfLabel = perSfTotal / 2;
-      let bestBlocks = null;
-      let bestHeuristic = Infinity;
-      let bestRule = '';
-      const failureReasons = new Set();
-      for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
-        const layerMap = new Map();
-        let failed = false;
-        for (const sf of sfLevels) {
-          const layerSeed = `GAUSS_II_SESSION${sessionIndex}_sf${sf}_attempt${attempt}`;
-          const poolResult = buildSfLayerPool(sf, perSfLabel, structure, hashString(layerSeed));
-          if (!poolResult.complete || poolResult.trials.length < perSfTotal) {
-            failureReasons.add(`sf${sf}`);
-            failed = true;
-            break;
-          }
-          const finalized = finalizeSfLayerTrials(
-            poolResult.trials.slice(0, perSfTotal),
-            structure,
-            hashString(`${layerSeed}_signs`)
-          );
-          if (finalized.length !== perSfTotal) {
-            failureReasons.add(`sf${sf}`);
-            failed = true;
-            break;
-          }
-          layerMap.set(sf, finalized);
-        }
-        if (failed) continue;
-        const merged = interleaveSfLayers(sfLevels, layerMap);
-        if (merged.length !== N_II) {
-          failureReasons.add('interleave');
-          continue;
-        }
-        const oriBalance = analyzeOriBucketBalance(merged);
-        if (!oriBalance.ok) {
-          failureReasons.add(`oriBuckets:${oriBalance.reasons.join('|')}`);
-          continue;
-        }
-        const blocks = [];
-        for (let blockIdx = 0; blockIdx < II_BLOCK_COUNT; blockIdx++) {
-          const slice = merged.slice(blockIdx * II_TRIALS_PER_BLOCK, (blockIdx + 1) * II_TRIALS_PER_BLOCK);
-          if (slice.length !== II_TRIALS_PER_BLOCK) {
-            failed = true;
-            break;
-          }
-          const annotated = slice.map((trial, idx) => ({
-            ...trial,
-            blockName: `II-${blockIdx + 1}`,
-            blockIndex: blockIdx + 1,
-            trialIndex: idx + 1
-          }));
-          const ordered = shuffleIIBlockTrialsWithAntiStreak(
-            annotated,
-            `GAUSS_II_SESSION${sessionIndex}_block${blockIdx}_attempt${attempt}`
-          );
-          blocks.push(ordered);
-        }
-        if (failed) {
-          failureReasons.add('block');
-          continue;
-        }
-        const flat = blocks.flat();
-        const heurResult = evaluateSingleDimHeuristics(flat);
-        const heur = Math.max(heurResult.sfAccuracy, heurResult.oriAccuracy);
-        if (heur <= II_SINGLE_DIM_MAX_ACCURACY) {
-          console.log(
-            `II session ${sessionIndex}: 单维≤${II_SINGLE_DIM_MAX_ACCURACY} (${heur.toFixed(3)} via ${heurResult.rule || heurResult.oriRule || heurResult.sfRule})`
-          );
-          return { blocks, heuristic: heur, bestRule: heurResult.rule || heurResult.oriRule || heurResult.sfRule, passed: true };
-        }
-        failureReasons.add('heuristics');
-        if (heur < bestHeuristic) {
-          bestHeuristic = heur;
-          bestBlocks = blocks;
-          bestRule = heurResult.rule || heurResult.oriRule || heurResult.sfRule || '';
-        }
-      }
-      if (bestBlocks) {
-        console.warn(
-          `II session ${sessionIndex}: 未满足单维≤${II_SINGLE_DIM_MAX_ACCURACY} 的要求，使用最佳候选 (overall=${bestHeuristic.toFixed(3)} via ${bestRule || 'N/A'})。建议：按照提示调整 II_GAUSS_PARAMS 或扩大物理范围以降低单维启发式准确率。`
-        );
-        const passedFallback = (bestHeuristic ?? 1) <= II_SINGLE_DIM_MAX_ACCURACY;
-        return { blocks: bestBlocks, heuristic: bestHeuristic, bestRule, passed: passedFallback };
-      }
-      const reasonList = Array.from(failureReasons).length ? Array.from(failureReasons).join(',') : '未知原因';
-      console.error(
-        `II session ${sessionIndex}: 无法生成高斯刺激计划（原因：${reasonList}）。请检查 II_GAUSS_PARAMS、物理范围或单维阈值设置。`
-      );
-      return { blocks: [], heuristic: 1, bestRule: '', passed: false };
-    }
     function precomputeGaussianStimuli() {
       lockPhysicalRanges();
-      const store = {};
-      const heuristics = {};
-      for (let sessionIdx = 1; sessionIdx <= 2; sessionIdx++) {
-        const rbBlocks = generateGaussianRBBlocks(sessionIdx);
-        const iiResult = generateGaussianIIBlocks(sessionIdx);
-        store[sessionIdx] = {
-          RB: rbBlocks || [],
-          II: iiResult.blocks || []
-        };
-        heuristics[sessionIdx] = iiResult.heuristic ?? 0;
-        if (!rbBlocks.length || !iiResult.blocks.length) {
-          console.error(`Session ${sessionIdx} 的刺激生成存在空集，请检查高斯参数或阈值设置。`);
+
+      const rb1 = generateRBStimulusSet(1, 'RB1', 'ORI_NEAR_A', 'RB1');
+      const rb2 = generateRBStimulusSet(2, 'RB2', 'ORI_NEAR_B', 'RB2');
+      STIM_RB1_TRAIN = rb1.train;
+      STIM_RB1_GEN = rb1.gen;
+      STIM_RB2_TRAIN = rb2.train;
+      STIM_RB2_GEN = rb2.gen;
+
+      const ii1 = generateIIStimulusSet(1, 'II1', 'II1');
+      const ii2 = generateIIStimulusSet(2, 'II2', 'II2');
+      STIM_II1_TRAIN = ii1.train;
+      STIM_II1_GEN = ii1.gen;
+      STIM_II2_TRAIN = ii2.train;
+      STIM_II2_GEN = ii2.gen;
+
+      const store = {
+        1: {
+          RB: chunkStimuliForBlocks(STIM_RB1_TRAIN, RB_TRIALS_PER_BLOCK, 'RB', 'RB1'),
+          II: chunkStimuliForBlocks(STIM_II1_TRAIN, II_TRIALS_PER_BLOCK, 'II', 'II1')
+        },
+        2: {
+          RB: chunkStimuliForBlocks(STIM_RB2_TRAIN, RB_TRIALS_PER_BLOCK, 'RB', 'RB2'),
+          II: chunkStimuliForBlocks(STIM_II2_TRAIN, II_TRIALS_PER_BLOCK, 'II', 'II2')
         }
-      }
+      };
+
+      const heuristics = {
+        1: ii1.heuristics?.singleAccuracy ?? 0,
+        2: ii2.heuristics?.singleAccuracy ?? 0
+      };
       lastStimulusPlanMeta = { rangeChoice: getActiveRangeDescriptor(), heuristics };
-      console.log('使用统一物理范围生成刺激：', lastStimulusPlanMeta.rangeChoice, 'II heuristics=', heuristics);
+      console.log('预生成固定刺激集：', {
+        range: lastStimulusPlanMeta.rangeChoice,
+        heuristics,
+        rbTrain: { RB1: STIM_RB1_TRAIN.length, RB2: STIM_RB2_TRAIN.length },
+        iiTrain: { II1: STIM_II1_TRAIN.length, II2: STIM_II2_TRAIN.length }
+      });
+
+      if (!store[1].RB.length || !store[1].II.length || !store[2].RB.length || !store[2].II.length) {
+        console.error('警告：某些 session 的刺激块为空，请检查高斯参数或采样阈值设置。');
+      }
+
       return store;
     }
 
