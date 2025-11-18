@@ -273,6 +273,7 @@
 
     const II_BIN_KEYS = ['b1', 'b2', 'b3'];
     const II_LABELS = ['A', 'B'];
+    const II_ORI_BUCKET_MIN_PER_LABEL = 4; // ensure每个 |ori| 桶中 A/B 至少出现次数，避免方向单维过度诊断
 
     const CSV_HEADER = [
       'participant','group','orderCode','serial','sessionIndex','movement','task','iiStructure','orderInSession',
@@ -1001,6 +1002,45 @@
       return merged;
     }
 
+    function analyzeOriBucketBalance(trials) {
+      if (!dynamicBinRanges || !trials || !trials.length) {
+        return { ok: true, buckets: {}, reasons: [] };
+      }
+      const bucketStats = {};
+      II_BIN_KEYS.forEach(key => {
+        bucketStats[key] = { total: 0, A: 0, B: 0 };
+      });
+      const classify = absOri => {
+        if (absOri <= dynamicBinRanges.b1.max) return 'b1';
+        if (absOri <= dynamicBinRanges.b2.max) return 'b2';
+        if (absOri <= dynamicBinRanges.b3.max + 1e-6) return 'b3';
+        return null;
+      };
+      trials.forEach(trial => {
+        const absOri = Math.abs(trial.ori);
+        const bucket = classify(absOri);
+        if (!bucket || !bucketStats[bucket]) return;
+        const stats = bucketStats[bucket];
+        stats.total += 1;
+        stats[trial.label] += 1;
+      });
+      const reasons = [];
+      let ok = true;
+      II_BIN_KEYS.forEach(key => {
+        const stats = bucketStats[key];
+        if (!stats || stats.total === 0) {
+          ok = false;
+          reasons.push(`${key}:0`);
+          return;
+        }
+        if (stats.A < II_ORI_BUCKET_MIN_PER_LABEL || stats.B < II_ORI_BUCKET_MIN_PER_LABEL) {
+          ok = false;
+          reasons.push(`${key}:A${stats.A}_B${stats.B}`);
+        }
+      });
+      return { ok, buckets: bucketStats, reasons };
+    }
+
     function generateGaussianIIBlocks(sessionIndex) {
       const config = II_GAUSS_PARAMS[sessionIndex];
       if (!config) return { blocks: [], heuristic: 1, passed: false };
@@ -1040,6 +1080,11 @@
         const merged = interleaveSfLayers(sfLevels, layerMap);
         if (merged.length !== N_II) {
           failureReasons.add('interleave');
+          continue;
+        }
+        const oriBalance = analyzeOriBucketBalance(merged);
+        if (!oriBalance.ok) {
+          failureReasons.add(`oriBuckets:${oriBalance.reasons.join('|')}`);
           continue;
         }
         const blocks = [];
