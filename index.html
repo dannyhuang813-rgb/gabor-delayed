@@ -206,6 +206,20 @@
       }
     };
 
+    const II_STRUCTURES_LIBRARY = {
+      // Session 1：权重相近、ori 为正向，bias=0 → 对称边界
+      II1: { key: 'II1', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.0, oriSign: 1 },
+      // Session 2：保持对称权重，但翻转 ori 项并加入偏置，形成不同倾斜与截距
+      II2: { key: 'II2', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.08, oriSign: -1 }
+    };
+
+    const II_STRUCTURE_PLANS = {
+      1: [{ key: 'II1', blocks: 5 }],
+      2: [{ key: 'II2', blocks: 5 }]
+    };
+
+    const II_SINGLE_DIM_MAX_ACCURACY = 0.60;
+
     const DELAYED_STAGE_MS = 2000;
 
     const II_NEAR_LOWER = 0.45;
@@ -220,10 +234,18 @@
       { bin1: 12, bin2: 14, bin3: 14 }
     ];
 
-    const II_BIN_SIZE_PER_BLOCK = 16; // three bins * 16 = 48 per block
+    const II_BIN_KEYS = ['b1', 'b2', 'b3'];
+    const II_BIN_RANGES = {
+      b1: { min: 1, max: 5 },
+      b2: { min: 6, max: 10 },
+      b3: { min: 11, max: 15 }
+    };
+    const II_LABELS = ['A', 'B'];
+    const II_SIGN_TEMPLATE = [1, -1, 1, -1, 1, -1, 1, -1];
+    const II_SAMPLES_PER_SF_LABEL = 2; // 每个 sf & label & bin 组合各采 2 次
 
     const CSV_HEADER = [
-      'participant','group','orderCode','serial','sessionIndex','movement','task','orderInSession',
+      'participant','group','orderCode','serial','sessionIndex','movement','task','iiStructure','orderInSession',
       'blockName','blockIndex','trialIndex','sf','ori','nearFlag','label','correctKey','resp','corr','rt','delayMs','trialStartUTC','qc_near_ratio','qc_counts_json'
     ];
 
@@ -476,10 +498,16 @@
     }
 
     function sessionParams(sessionIndex) {
-      if (sessionIndex === 2) {
-        return { rbRule: 'A_GT7', wsf: 0.35, wori: 0.65 };
+      const planTemplate = II_STRUCTURE_PLANS[sessionIndex];
+      if (!planTemplate) {
+        console.error(`未为 session ${sessionIndex} 定义 II 计划模板`);
+        return { rbRule: sessionIndex === 2 ? 'A_GT7' : 'A_LT7', iiPlan: [] };
       }
-      return { rbRule: 'A_LT7', wsf: 0.65, wori: 0.35 };
+      const iiPlan = planTemplate.map(item => ({ ...item }));
+      if (sessionIndex === 2) {
+        return { rbRule: 'A_GT7', iiPlan };
+      }
+      return { rbRule: 'A_LT7', iiPlan };
     }
 
     // -------------------------
@@ -493,16 +521,21 @@
       return absOri > 7 ? 'A' : 'B';
     }
 
-    function computeIIScore(sfLines, oriDeg, weights) {
+    function computeIIProjection(sfLines, oriDeg, structure) {
+      const cfg = structure || {};
+      const weights = cfg.weights || { wsf: 0.5, wori: 0.5 };
+      const bias = cfg.bias || 0;
+      const oriSign = cfg.oriSign || 1;
       const x = (sfLines - 4.5) / 1.5;
-      const y = oriDeg / 15;
-      const raw = weights.wsf * x + weights.wori * y;
+      const yRaw = oriDeg / 15;
+      const y = oriSign * yRaw;
+      const raw = weights.wsf * x + weights.wori * y - bias;
       const norm = Math.sqrt(weights.wsf * weights.wsf + weights.wori * weights.wori);
-      return { x, y, raw, norm };
+      return { x, y, yRaw, raw, norm };
     }
 
-    function labelII(sfLines, oriDeg, weights) {
-      return computeIIScore(sfLines, oriDeg, weights).raw > 0 ? 'A' : 'B';
+    function labelII(sfLines, oriDeg, structure) {
+      return computeIIProjection(sfLines, oriDeg, structure).raw > 0 ? 'A' : 'B';
     }
 
     // -------------------------
@@ -654,163 +687,234 @@
 
         shuffleInPlace(orientations, hashString(`${rngSeed}_order`));
         const sfSchedule = buildSfSchedule(targetPerBlock, `${rngSeed}_sf`);
-        const trials = orientations.map((item, idx) => {
-          const sf = sfSchedule[idx];
-          const ori = item.ori;
-          const label = labelRB(ori, rbRule);
-          return {
-            blockName: `RB-${blockIdx + 1}`,
-            blockIndex: blockIdx + 1,
-            trialIndex: idx + 1,
-            sf,
-            ori,
-            binKey: item.binKey || determineBinKey(ori),
-            nearFlag: 0,
-            label,
-            correctKey: label === 'A' ? 'a' : 'b'
-          };
-        });
+          const trials = orientations.map((item, idx) => {
+            const sf = sfSchedule[idx];
+            const ori = item.ori;
+            const label = labelRB(ori, rbRule);
+            return {
+              blockName: `RB-${blockIdx + 1}`,
+              blockIndex: blockIdx + 1,
+              trialIndex: idx + 1,
+              sf,
+              ori,
+              binKey: item.binKey || determineBinKey(ori),
+              nearFlag: 0,
+              iiStructure: '',
+              label,
+              correctKey: label === 'A' ? 'a' : 'b'
+            };
+          });
         const shuffled = shuffleBlockTrials(trials, `${rngSeed}_finalOrder`);
         blocks.push(shuffled);
       });
       return blocks;
     }
 
-    function buildIIPairsForBin(binStart, binEnd, pairCount, seed, binKey) {
-      const mags = symmetricPairMagnitudes(binStart, binEnd, pairCount);
-      const rng = hashString(seed);
-      const pairs = [];
-      mags.forEach((mag, idx) => {
-        const jitter = (rng() * 2 - 1) * ORI_JITTER;
-        const magWithJitter = clamp(mag + jitter, ORI_MIN, ORI_MAX);
-        const pos = { ori: magWithJitter, binKey };
-        const neg = { ori: -magWithJitter, binKey };
-        pairs.push([pos, neg]);
-      });
-      shuffleInPlace(pairs, hashString(`${seed}_shuffle`));
-      return pairs;
+    function getIIStructureConfig(key) {
+      return II_STRUCTURES_LIBRARY[key] || null;
     }
 
-    function makeTrialsII_balancedV3(participantId, weights) {
-      const blocks = [];
-      const pairsPerBlock = 24; // 48 trials /2
-      for (let blockIdx = 0; blockIdx < 5; blockIdx++) {
-        const ratioRng = hashString(`${participantId}_II_v3_block${blockIdx}_ratio`);
-        const desiredRatio = II_NEAR_LOWER + ratioRng() * (II_NEAR_UPPER - II_NEAR_LOWER);
-        const minNear = Math.ceil(48 * II_NEAR_LOWER);
-        const maxNear = Math.floor(48 * II_NEAR_UPPER);
-        let desiredNear = Math.round(48 * desiredRatio);
-        desiredNear = clamp(desiredNear, minNear, maxNear);
-        if (desiredNear % 2 === 1) {
-          if (desiredNear + 1 <= maxNear) desiredNear += 1; else desiredNear -= 1;
-        }
-        const desiredFar = 48 - desiredNear;
+    function formatIIStructureFormula(structure) {
+      if (!structure) return '';
+      const weights = structure.weights || { wsf: 0.5, wori: 0.5 };
+      const oriSymbol = structure.oriSign === -1 ? '-y' : 'y';
+      const bias = structure.bias || 0;
+      return `${structure.key}: score = ${weights.wsf.toFixed(2)} * x + ${weights.wori.toFixed(2)} * ${oriSymbol} - ${bias.toFixed(2)} (x=(sf-4.5)/1.5, y=ori/15)`;
+    }
 
-        let bestTrials = null;
-        let bestScore = Infinity;
-        for (let attempt = 0; attempt < 10; attempt++) {
-          const seed = `${participantId}_II_v3_block${blockIdx}_attempt${attempt}`;
-          const bin1Pairs = buildIIPairsForBin(1, 5, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin1`, 'b1');
-          const bin2Pairs = buildIIPairsForBin(6, 10, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin2`, 'b2');
-          const bin3Pairs = buildIIPairsForBin(11, 15, II_BIN_SIZE_PER_BLOCK / 2, `${seed}_bin3`, 'b3');
-          const allPairs = [...bin1Pairs, ...bin2Pairs, ...bin3Pairs];
-          shuffleInPlace(allPairs, hashString(`${seed}_pairOrder`));
+    function buildSignPattern(rng) {
+      const pattern = [...II_SIGN_TEMPLATE];
+      shuffleInPlace(pattern, rng);
+      return pattern;
+    }
 
-          const sfPairs = [];
-          SF_LINES.forEach(sf => {
-            for (let i = 0; i < 6; i++) sfPairs.push(sf);
-          });
-          shuffleInPlace(sfPairs, hashString(`${seed}_sfPairs`));
+    function sampleIIStimulus(structure, sf, binKey, targetLabel, sign, rng) {
+      const range = II_BIN_RANGES[binKey];
+      if (!range) return null;
+      const maxAttempts = 80;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const mag = range.min + (range.max - range.min) * rng();
+        const jitter = (rng() * 2 - 1) * ORI_JITTER;
+        const magnitude = clamp(mag + jitter, range.min, range.max);
+        const ori = clamp(sign * magnitude, ORI_MIN, ORI_MAX);
+        const score = computeIIProjection(sf, ori, structure);
+        const label = score.raw > 0 ? 'A' : 'B';
+        if (label !== targetLabel) continue;
+        const dist = Math.abs(score.raw) / (score.norm || 1);
+        const nearFlag = dist <= 0.5 ? 1 : 0;
+        const symbolicFlag = (Math.sign(score.x) !== 0 && Math.sign(score.x) === Math.sign(score.y)) ? 1 : 0;
+        return {
+          sf,
+          ori,
+          binKey,
+          nearFlag,
+          symbolicFlag,
+          label,
+          iiStructure: structure.key,
+          correctKey: label === 'A' ? 'a' : 'b'
+        };
+      }
+      return null;
+    }
 
-          const trials = [];
-          let nearCount = 0;
-          let nearSymbolicCount = 0;
-          for (let p = 0; p < pairsPerBlock; p++) {
-            const sf = sfPairs[p];
-            const pair = allPairs[p % allPairs.length];
-            pair.forEach((oriObj) => {
-              const ori = oriObj.ori;
-              const score = computeIIScore(sf, ori, weights);
-              const dist = Math.abs(score.raw) / (score.norm || 1);
-              const nearFlag = dist <= 0.5 ? 1 : 0;
-              const symbolicFlag = (Math.sign(score.x) !== 0 && Math.sign(score.x) === Math.sign(score.y)) ? 1 : 0;
-              if (nearFlag) nearCount += 1;
-              if (nearFlag && symbolicFlag) nearSymbolicCount += 1;
-              const label = score.raw > 0 ? 'A' : 'B';
-              trials.push({
-                blockName: `II-${blockIdx + 1}`,
-                blockIndex: blockIdx + 1,
-                trialIndex: trials.length + 1,
-                sf,
-                ori,
-                binKey: oriObj.binKey || determineBinKey(ori),
-                nearFlag,
-                symbolicFlag,
-                label,
-                correctKey: label === 'A' ? 'a' : 'b'
-              });
-            });
-          }
-
-          const nearRatio = nearCount / trials.length;
-          const nearSymbolicRatio = nearCount ? (nearSymbolicCount / nearCount) : 0;
-          const countA = trials.filter(t => t.label === 'A').length;
-          const sfCountsOk = SF_LINES.every(sf => trials.filter(t => t.sf === sf).length === 12);
-          const binCounts = { b1: 0, b2: 0, b3: 0 };
-          let nearA = 0, nearB = 0, farA = 0, farB = 0;
-          trials.forEach(t => {
-            const binKey = t.binKey || determineBinKey(t.ori);
-            if (binKey) binCounts[binKey] += 1;
-            if (t.nearFlag) {
-              if (t.label === 'A') nearA += 1; else nearB += 1;
-            } else {
-              if (t.label === 'A') farA += 1; else farB += 1;
+    function buildIIBlockForStructure(participantId, structure, globalBlockIndex, attemptSeed) {
+      const maxAttempts = 40;
+      let bestCandidate = null;
+      let bestScore = Infinity;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const rng = hashString(`${participantId}_${structure.key}_blk${globalBlockIndex}_${attemptSeed}_${attempt}`);
+        const blockTrials = [];
+        let failed = false;
+        for (const binKey of II_BIN_KEYS) {
+          if (failed) break;
+          for (const label of II_LABELS) {
+            if (failed) break;
+            const signPattern = buildSignPattern(rng);
+            let signIndex = 0;
+            const sfOrder = SF_LINES.slice();
+            shuffleInPlace(sfOrder, rng);
+            for (const sf of sfOrder) {
+              for (let rep = 0; rep < II_SAMPLES_PER_SF_LABEL; rep++) {
+                const sign = signPattern[signIndex % signPattern.length];
+                signIndex++;
+                const stim = sampleIIStimulus(structure, sf, binKey, label, sign, rng);
+                if (!stim) {
+                  failed = true;
+                  break;
+                }
+                blockTrials.push(stim);
+              }
+              if (failed) break;
             }
-          });
-          const binsOk = binCounts.b1 === 16 && binCounts.b2 === 16 && binCounts.b3 === 16;
-          const classOk = countA === trials.length / 2;
-          const nearOk = nearCount === desiredNear || (nearCount >= minNear && nearCount <= maxNear);
-          const nearBalanceOk = nearA === nearB;
-          const farBalanceOk = farA === farB;
-          const symbolicOk = nearCount === 0 ? false : (nearSymbolicRatio >= II_NEAR_SYMBOLIC_MIN_RATIO);
-          const nearDiff = Math.abs(nearCount - desiredNear);
-          const balancePenalty = (Math.abs(nearA - nearB) + Math.abs(farA - farB));
-          const ratioPenalty = Math.abs(nearRatio - (desiredNear / trials.length));
-          const symbolicPenalty = nearCount === 0 ? 100 : Math.max(0, II_NEAR_SYMBOLIC_MIN_RATIO - nearSymbolicRatio) * 100;
-          const candidateScore = nearDiff * 15 + balancePenalty * 2 + ratioPenalty * 100 + symbolicPenalty;
-          if (candidateScore < bestScore) {
-            bestScore = candidateScore;
-            bestTrials = trials;
-          }
-          if (sfCountsOk && binsOk && classOk && nearOk && nearBalanceOk && farBalanceOk && symbolicOk && nearCount === desiredNear && farA + farB === desiredFar) {
-            bestTrials = trials;
-            break;
           }
         }
-        if (bestTrials) {
-          const summary = summarizeIIBlock(bestTrials);
-          const summaryOk = (
-            summary.countA === summary.countB &&
-            SF_LINES.every(sf => summary.sfCounts[sf] === 12) &&
-            summary.binCounts.b1 === 16 && summary.binCounts.b2 === 16 && summary.binCounts.b3 === 16 &&
-            summary.nearRatio >= II_NEAR_LOWER && summary.nearRatio <= II_NEAR_UPPER &&
-            summary.nearA === summary.nearB && summary.farA === summary.farB &&
-            summary.nearSymbolicRatio >= II_NEAR_SYMBOLIC_MIN_RATIO
-          );
-          if (!summaryOk) {
-            console.warn('II block best-effort schedule deviated from strict target', {
-              block: blockIdx + 1,
-              summary
-            });
-          }
-          const finalOrder = shuffleIIBlockTrialsWithAntiStreak(
-            bestTrials,
-            `${participantId}_II_v3_block${blockIdx}_final`
-          );
-          blocks.push(finalOrder);
+        if (failed || blockTrials.length !== 48) continue;
+        const summary = summarizeIIBlock(blockTrials);
+        const sfBalanceOk = SF_LINES.every(sf => {
+          const subset = blockTrials.filter(t => t.sf === sf);
+          return subset.filter(t => t.label === 'A').length === subset.length / 2;
+        });
+        const binBalanceOk = II_BIN_KEYS.every(binKey => {
+          const subset = blockTrials.filter(t => t.binKey === binKey);
+          return subset.filter(t => t.label === 'A').length === subset.length / 2;
+        });
+        const nearRatioOk = summary.nearRatio >= II_NEAR_LOWER && summary.nearRatio <= II_NEAR_UPPER;
+        const nearBalanceOk = summary.nearA === summary.nearB && summary.farA === summary.farB;
+        const symbolicOk = summary.nearSymbolicRatio >= II_NEAR_SYMBOLIC_MIN_RATIO;
+        const classOk = summary.countA === summary.countB;
+        const penalty = (
+          Math.abs(summary.nearRatio - (II_NEAR_LOWER + II_NEAR_UPPER) / 2) * 100 +
+          Math.abs(summary.nearA - summary.nearB) * 5 +
+          Math.abs(summary.farA - summary.farB) * 5 +
+          (symbolicOk ? 0 : 200) +
+          (sfBalanceOk ? 0 : 200) +
+          (binBalanceOk ? 0 : 200) +
+          (classOk ? 0 : 200)
+        );
+        if (penalty < bestScore) {
+          bestScore = penalty;
+          bestCandidate = blockTrials.slice();
+        }
+        if (sfBalanceOk && binBalanceOk && nearRatioOk && nearBalanceOk && symbolicOk && classOk) {
+          const ordered = shuffleIIBlockTrialsWithAntiStreak(blockTrials, `${participantId}_${structure.key}_blk${globalBlockIndex}_${attemptSeed}_order${attempt}`);
+          return ordered;
         }
       }
-      return blocks;
+      if (bestCandidate) {
+        console.warn('II block fell back to best candidate under new constraints', {
+          structure: structure.key,
+          block: globalBlockIndex + 1
+        });
+        const ordered = shuffleIIBlockTrialsWithAntiStreak(bestCandidate, `${participantId}_${structure.key}_blk${globalBlockIndex}_${attemptSeed}_fallback`);
+        return ordered;
+      }
+      return null;
+    }
+
+    function evaluateSingleDimHeuristics(trials) {
+      if (!trials || trials.length === 0) return 0;
+      const total = trials.length;
+      const classifiers = [];
+      const sfThresholds = [3.5, 4.5, 5.5];
+      sfThresholds.forEach(th => {
+        classifiers.push(t => (t.sf <= th ? 'A' : 'B'));
+        classifiers.push(t => (t.sf <= th ? 'B' : 'A'));
+        classifiers.push(t => (t.sf < th ? 'A' : 'B'));
+        classifiers.push(t => (t.sf < th ? 'B' : 'A'));
+      });
+      for (let deg = 1; deg <= 15; deg++) {
+        classifiers.push(t => (Math.abs(t.ori) <= deg ? 'A' : 'B'));
+        classifiers.push(t => (Math.abs(t.ori) <= deg ? 'B' : 'A'));
+        classifiers.push(t => (t.ori <= deg ? 'A' : 'B'));
+        classifiers.push(t => (t.ori <= deg ? 'B' : 'A'));
+        classifiers.push(t => (t.ori >= deg ? 'A' : 'B'));
+        classifiers.push(t => (t.ori >= deg ? 'B' : 'A'));
+      }
+      classifiers.push(t => (t.ori >= 0 ? 'A' : 'B'));
+      classifiers.push(t => (t.ori >= 0 ? 'B' : 'A'));
+      classifiers.push(t => (t.ori <= 0 ? 'A' : 'B'));
+      classifiers.push(t => (t.ori <= 0 ? 'B' : 'A'));
+      let maxAccuracy = 0;
+      classifiers.forEach(fn => {
+        let correct = 0;
+        for (const trial of trials) {
+          if (fn(trial) === trial.label) correct += 1;
+        }
+        const acc = correct / total;
+        if (acc > maxAccuracy) maxAccuracy = acc;
+      });
+      return maxAccuracy;
+    }
+
+    function buildIIBlocksForPlan(participantId, plan, attemptSuffix) {
+      const blocks = [];
+      let globalBlockIndex = 0;
+      for (const entry of plan) {
+        const structure = getIIStructureConfig(entry.key);
+        if (!structure) continue;
+        const blockCount = entry.blocks || 0;
+        for (let i = 0; i < blockCount; i++) {
+          const trials = buildIIBlockForStructure(participantId, structure, globalBlockIndex, `${attemptSuffix}_${entry.key}_${i}`);
+          if (!trials) {
+            return null;
+          }
+          const annotated = trials.map((trial, idx) => ({
+            ...trial,
+            blockName: `II-${globalBlockIndex + 1}`,
+            blockIndex: globalBlockIndex + 1,
+            trialIndex: idx + 1
+          }));
+          blocks.push(annotated);
+          globalBlockIndex += 1;
+        }
+      }
+      const flatTrials = blocks.flat();
+      const heuristicMax = evaluateSingleDimHeuristics(flatTrials);
+      return { blocks, heuristicMax };
+    }
+
+    function makeTrialsII_balancedV3(participantId, plan) {
+      if (!Array.isArray(plan) || !plan.length) {
+        console.error('缺少与 session 对应的 II 结构计划，无法继续。');
+        return [];
+      }
+      const maxAttempts = 12;
+      let bestBlocks = null;
+      let bestScore = Infinity;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const result = buildIIBlocksForPlan(participantId, plan, `attempt${attempt}`);
+        if (!result) continue;
+        if (result.heuristicMax <= II_SINGLE_DIM_MAX_ACCURACY) {
+          console.log(`II 单维度启发式最大准确率=${result.heuristicMax.toFixed(3)}，已满足 <= ${II_SINGLE_DIM_MAX_ACCURACY}`);
+          return result.blocks;
+        }
+        if (result.heuristicMax < bestScore) {
+          bestScore = result.heuristicMax;
+          bestBlocks = result.blocks;
+        }
+      }
+      console.warn('II 条件在给定尝试内未能降到 60% 以下，使用最接近方案', { bestScore });
+      return bestBlocks || [];
     }
     // -------------------------
     // Stimulus rendering
@@ -1173,6 +1277,7 @@
           participantMeta.sessionIndex,
           participantMeta.movement,
           task,
+          trial.iiStructure || '',
           orderInSession,
           trial.blockName,
           blockIndex,
@@ -1204,7 +1309,7 @@
       resizeCanvas();
       window.addEventListener('resize', resizeCanvas);
       const rbBlocks = makeTrialsRB_balancedV3(participantId, sessionConfig.rbRule);
-      const iiBlocks = makeTrialsII_balancedV3(participantId, { wsf: sessionConfig.wsf, wori: sessionConfig.wori });
+      const iiBlocks = makeTrialsII_balancedV3(participantId, sessionConfig.iiPlan);
       const blockStore = { RB: rbBlocks, II: iiBlocks };
       for (let t = 0; t < participantMeta.taskOrder.length; t++) {
         const task = participantMeta.taskOrder[t];
@@ -1317,7 +1422,11 @@
       }
       sessionConfig = sessionParams(participantMeta.sessionIndex);
       console.log(`ID 解析: group=${participantMeta.group}, orderCode=${participantMeta.orderCode}, serial=${participantMeta.serial}, session=${participantMeta.sessionIndex}, movement=${participantMeta.movement}, taskOrder=${participantMeta.taskOrder.join('>')}, delayMs=${participantMeta.delayMs}`);
-      console.log(`II 判定公式：score = ${sessionConfig.wsf.toFixed(2)} * x + ${sessionConfig.wori.toFixed(2)} * y (bias=0, x=(sf-4.5)/1.5, y=ori/15)`);
+      const iiFormulaSummary = (sessionConfig.iiPlan || []).map(entry => {
+        const structure = getIIStructureConfig(entry.key);
+        return formatIIStructureFormula(structure);
+      }).join(' | ');
+      console.log(`II 判定公式：${iiFormulaSummary}`);
       startScreen.style.display = 'none';
       experimentContainer.style.display = 'flex';
       updateStatus('正在尝试进入全屏模式...');
