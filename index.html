@@ -219,6 +219,7 @@
     };
 
     const II_SINGLE_DIM_MAX_ACCURACY = 0.58;
+    const II_MAX_PLAN_ATTEMPTS = 80;
 
     const DELAYED_STAGE_MS = 2000;
 
@@ -847,7 +848,7 @@
       return `${structure.key}: score = ${weights.wsf.toFixed(2)} * x + ${weights.wori.toFixed(2)} * ${oriSymbol} - ${bias.toFixed(2)} (x=(sf-4.5)/1.5, y=ori/15)`;
     }
 
-    function sampleIIStimulus(structure, sf, binKey, targetLabel, rng) {
+    function sampleIIStimulus(structure, sf, binKey, targetLabel, desiredSign, rng) {
       const range = II_BIN_RANGES[binKey];
       if (!range) return null;
       const maxAttempts = 160;
@@ -855,7 +856,7 @@
         const mag = range.min + (range.max - range.min) * rng();
         const jitter = (rng() * 2 - 1) * ORI_JITTER;
         const magnitude = clamp(mag + jitter, range.min, range.max);
-        const sign = rng() < 0.5 ? -1 : 1;
+        const sign = desiredSign || (rng() < 0.5 ? -1 : 1);
         const ori = clamp(sign * magnitude, ORI_MIN, ORI_MAX);
         const score = computeIIProjection(sf, ori, structure);
         const label = score.raw > 0 ? 'A' : 'B';
@@ -894,8 +895,11 @@
             if (!cell) continue;
             for (const label of II_LABELS) {
               const need = cell[label] || 0;
+              const signSequence = rng() < 0.5 ? [1, -1] : [-1, 1];
+              const signOffset = Math.floor(rng() * signSequence.length);
               for (let rep = 0; rep < need; rep++) {
-                const stim = sampleIIStimulus(structure, sf, binKey, label, rng);
+                const desiredSign = signSequence[(rep + signOffset) % signSequence.length];
+                const stim = sampleIIStimulus(structure, sf, binKey, label, desiredSign, rng);
                 if (!stim) {
                   failed = true;
                   break;
@@ -1018,13 +1022,10 @@
 
     function makeTrialsII_balancedV3(participantId, plan) {
       if (!Array.isArray(plan) || !plan.length) {
-        console.error('缺少与 session 对应的 II 结构计划，无法继续。');
-        return [];
+        throw new Error('缺少与 session 对应的 II 结构计划，无法生成 II 条件。');
       }
-      const maxAttempts = 5;
-      let bestBlocks = null;
       let bestScore = Infinity;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
         const result = buildIIBlocksForPlan(participantId, plan, `attempt${attempt}`);
         if (!result) continue;
         if (result.heuristicMax <= II_SINGLE_DIM_MAX_ACCURACY) {
@@ -1033,11 +1034,10 @@
         }
         if (result.heuristicMax < bestScore) {
           bestScore = result.heuristicMax;
-          bestBlocks = result.blocks;
         }
       }
-      console.warn('II 条件在给定尝试内未能降到 60% 以下，使用最接近方案', { bestScore });
-      return bestBlocks || [];
+      const bestScoreStr = Number.isFinite(bestScore) ? bestScore.toFixed(3) : '未知';
+      throw new Error(`II 条件生成失败：单维度启发式最优正确率 ${bestScoreStr} 仍高于 ${II_SINGLE_DIM_MAX_ACCURACY}`);
     }
     // -------------------------
     // Stimulus rendering
@@ -1429,8 +1429,22 @@
       dataRows = [];
       resizeCanvas();
       window.addEventListener('resize', resizeCanvas);
-      const rbBlocks = makeTrialsRB_balancedV3(participantId, sessionConfig.rbRule);
-      const iiBlocks = makeTrialsII_balancedV3(participantId, sessionConfig.iiPlan);
+      let rbBlocks = [];
+      let iiBlocks = [];
+      try {
+        rbBlocks = makeTrialsRB_balancedV3(participantId, sessionConfig.rbRule);
+        iiBlocks = makeTrialsII_balancedV3(participantId, sessionConfig.iiPlan);
+      } catch (err) {
+        console.error('试次生成失败', err);
+        alert(`II 条件生成失败：${err && err.message ? err.message : err}`);
+        experimentRunning = false;
+        setExitButtonVisibility(false);
+        forceResolveWaitOverlay();
+        hideWaitOverlay();
+        startScreen.style.display = 'flex';
+        experimentContainer.style.display = 'none';
+        return;
+      }
       const blockStore = { RB: rbBlocks, II: iiBlocks };
       for (let t = 0; t < participantMeta.taskOrder.length; t++) {
         const task = participantMeta.taskOrder[t];
