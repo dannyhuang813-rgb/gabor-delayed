@@ -207,10 +207,10 @@
     };
 
     const II_STRUCTURES_LIBRARY = {
-      // Session 1：权重相近、ori 为正向，bias=0 → 对称边界
-      II1: { key: 'II1', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.0, oriSign: 1 },
-      // Session 2：保持对称权重，但翻转 ori 项并加入偏置，形成不同倾斜与截距
-      II2: { key: 'II2', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.08, oriSign: -1 }
+      // Session 1：两维对称标准化，保持 0.5/0.5 的权重搭配
+      II1: { key: 'II1', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.02, oriSign: 1 },
+      // Session 2：沿 ori 轴镜像并平移截距，保持与 Session 1 相同的 0.5/0.5 权重
+      II2: { key: 'II2', weights: { wsf: 0.5, wori: 0.5 }, bias: -0.02, oriSign: -1 }
     };
 
     const II_STRUCTURE_PLANS = {
@@ -241,8 +241,6 @@
       b3: { min: 11, max: 15 }
     };
     const II_LABELS = ['A', 'B'];
-    const II_SIGN_TEMPLATE = [1, -1, 1, -1, 1, -1, 1, -1];
-    const II_SAMPLES_PER_SF_LABEL = 2; // 每个 sf & label & bin 组合各采 2 次
 
     const CSV_HEADER = [
       'participant','group','orderCode','serial','sessionIndex','movement','task','iiStructure','orderInSession',
@@ -460,18 +458,85 @@
         stats.total += 1;
         if (trial.label === 'A') stats.countA += 1; else stats.countB += 1;
       });
-      for (const sf of SF_LINES) {
-        for (const binKey of II_BIN_KEYS) {
-          const stats = comboMap.get(`${sf}_${binKey}`);
-          if (!stats || stats.total === 0) {
-            return false;
-          }
-          if (stats.countA !== stats.countB) {
-            return false;
+      let maxDiff = 0;
+      for (const stats of comboMap.values()) {
+        if (stats.total === 0) continue;
+        const diff = Math.abs(stats.countA - stats.countB);
+        if (diff > maxDiff) maxDiff = diff;
+      }
+      return maxDiff;
+    }
+
+    function isLabelFeasible(structure, sf, binKey, targetLabel) {
+      const range = II_BIN_RANGES[binKey];
+      if (!range) return false;
+      const steps = 24;
+      const signs = [-1, 1];
+      for (const sign of signs) {
+        for (let i = 0; i <= steps; i++) {
+          const t = i / steps;
+          const mag = range.min + (range.max - range.min) * t;
+          const ori = clamp(sign * mag, ORI_MIN, ORI_MAX);
+          const label = labelII(sf, ori, structure);
+          if (label === targetLabel) {
+            return true;
           }
         }
       }
-      return true;
+      return false;
+    }
+
+    function allocateIIComboCounts(structure, rng) {
+      const perSfLabel = (48 / SF_LINES.length) / 2;
+      const perBinLabel = (48 / II_BIN_KEYS.length) / 2;
+      const feasibleMap = {};
+      for (const label of II_LABELS) {
+        feasibleMap[label] = {};
+        for (const sf of SF_LINES) {
+          const feasibleBins = II_BIN_KEYS.filter(binKey => isLabelFeasible(structure, sf, binKey, label));
+          feasibleMap[label][sf] = feasibleBins;
+          if (!feasibleBins.length) {
+            console.warn('II alloc impossible for label/sf pair', { structure: structure.key, label, sf });
+            return null;
+          }
+        }
+      }
+      const queue = [];
+      for (const label of II_LABELS) {
+        for (const sf of SF_LINES) {
+          const options = feasibleMap[label][sf];
+          for (let i = 0; i < perSfLabel; i++) {
+            queue.push({ label, sf, options });
+          }
+        }
+      }
+      queue.sort((a, b) => {
+        if (a.options.length !== b.options.length) {
+          return a.options.length - b.options.length;
+        }
+        return (rng() - 0.5);
+      });
+      const remainingBinLabel = {};
+      II_BIN_KEYS.forEach(binKey => {
+        remainingBinLabel[binKey] = { A: perBinLabel, B: perBinLabel };
+      });
+      const allocations = {};
+      for (const item of queue) {
+        const feasibleBins = item.options.filter(binKey => remainingBinLabel[binKey][item.label] > 0);
+        if (!feasibleBins.length) {
+          console.warn('II alloc failed for label-sf pair', { structure: structure.key, sf: item.sf, label: item.label });
+          return null;
+        }
+        feasibleBins.sort((a, b) => remainingBinLabel[b][item.label] - remainingBinLabel[a][item.label]);
+        const topRemaining = remainingBinLabel[feasibleBins[0]][item.label];
+        const bestBins = feasibleBins.filter(binKey => remainingBinLabel[binKey][item.label] === topRemaining);
+        const selected = bestBins[Math.floor(rng() * bestBins.length) % bestBins.length];
+        if (!allocations[selected]) allocations[selected] = {};
+        if (!allocations[selected][item.sf]) allocations[selected][item.sf] = { A: 0, B: 0 };
+        allocations[selected][item.sf][item.label] += 1;
+        remainingBinLabel[selected][item.label] -= 1;
+      }
+      return allocations;
     }
 
     // -------------------------
@@ -748,20 +813,15 @@
       return `${structure.key}: score = ${weights.wsf.toFixed(2)} * x + ${weights.wori.toFixed(2)} * ${oriSymbol} - ${bias.toFixed(2)} (x=(sf-4.5)/1.5, y=ori/15)`;
     }
 
-    function buildSignPattern(rng) {
-      const pattern = [...II_SIGN_TEMPLATE];
-      shuffleInPlace(pattern, rng);
-      return pattern;
-    }
-
-    function sampleIIStimulus(structure, sf, binKey, targetLabel, sign, rng) {
+    function sampleIIStimulus(structure, sf, binKey, targetLabel, rng) {
       const range = II_BIN_RANGES[binKey];
       if (!range) return null;
-      const maxAttempts = 80;
+      const maxAttempts = 160;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const mag = range.min + (range.max - range.min) * rng();
         const jitter = (rng() * 2 - 1) * ORI_JITTER;
         const magnitude = clamp(mag + jitter, range.min, range.max);
+        const sign = rng() < 0.5 ? -1 : 1;
         const ori = clamp(sign * magnitude, ORI_MIN, ORI_MAX);
         const score = computeIIProjection(sf, ori, structure);
         const label = score.raw > 0 ? 'A' : 'B';
@@ -784,26 +844,24 @@
     }
 
     function buildIIBlockForStructure(participantId, structure, globalBlockIndex, attemptSeed) {
-      const maxAttempts = 40;
+      const maxAttempts = 25;
       let bestCandidate = null;
       let bestScore = Infinity;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         const rng = hashString(`${participantId}_${structure.key}_blk${globalBlockIndex}_${attemptSeed}_${attempt}`);
+        const allocations = allocateIIComboCounts(structure, rng);
+        if (!allocations) continue;
         const blockTrials = [];
         let failed = false;
         for (const binKey of II_BIN_KEYS) {
           if (failed) break;
-          for (const label of II_LABELS) {
-            if (failed) break;
-            const signPattern = buildSignPattern(rng);
-            let signIndex = 0;
-            const sfOrder = SF_LINES.slice();
-            shuffleInPlace(sfOrder, rng);
-            for (const sf of sfOrder) {
-              for (let rep = 0; rep < II_SAMPLES_PER_SF_LABEL; rep++) {
-                const sign = signPattern[signIndex % signPattern.length];
-                signIndex++;
-                const stim = sampleIIStimulus(structure, sf, binKey, label, sign, rng);
+          for (const sf of SF_LINES) {
+            const cell = allocations[binKey]?.[sf];
+            if (!cell) continue;
+            for (const label of II_LABELS) {
+              const need = cell[label] || 0;
+              for (let rep = 0; rep < need; rep++) {
+                const stim = sampleIIStimulus(structure, sf, binKey, label, rng);
                 if (!stim) {
                   failed = true;
                   break;
@@ -812,6 +870,7 @@
               }
               if (failed) break;
             }
+            if (failed) break;
           }
         }
         if (failed || blockTrials.length !== 48) continue;
@@ -824,7 +883,8 @@
           const subset = blockTrials.filter(t => t.binKey === binKey);
           return subset.length > 0 && subset.filter(t => t.label === 'A').length === subset.length / 2;
         });
-        const comboBalanceOk = checkSfBinLabelBalance(blockTrials);
+        const comboImbalance = checkSfBinLabelBalance(blockTrials);
+        const comboBalanceOk = comboImbalance <= 2;
         const nearRatioOk = summary.nearRatio >= II_NEAR_LOWER && summary.nearRatio <= II_NEAR_UPPER;
         const nearBalanceOk = summary.nearA === summary.nearB && summary.farA === summary.farB;
         const symbolicOk = summary.nearSymbolicRatio >= II_NEAR_SYMBOLIC_MIN_RATIO;
@@ -836,7 +896,7 @@
           (symbolicOk ? 0 : 200) +
           (sfBalanceOk ? 0 : 200) +
           (binBalanceOk ? 0 : 200) +
-          (comboBalanceOk ? 0 : 300) +
+          comboImbalance * 20 +
           (classOk ? 0 : 200)
         );
         if (penalty < bestScore) {
@@ -926,7 +986,7 @@
         console.error('缺少与 session 对应的 II 结构计划，无法继续。');
         return [];
       }
-      const maxAttempts = 12;
+      const maxAttempts = 5;
       let bestBlocks = null;
       let bestScore = Infinity;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -1347,8 +1407,14 @@
           await runBlock(task, blocks[b], t + 1);
         }
         if (aborted) break;
-        if (t === 0 && participantMeta.taskOrder.length > 1) {
-          await waitAnyKey('提示：接下来规则将发生变化，请按任意键继续。');
+        // Updated the block-loop transition logic so the “规则将发生变化”提示 now
+        // appears whenever the task order switches between RB and II, covering both
+        // RB→II and II→RB transitions as required.
+        if (t < participantMeta.taskOrder.length - 1) {
+          const nextTask = participantMeta.taskOrder[t + 1];
+          if (nextTask && nextTask !== task) {
+            await waitAnyKey('提示：接下来规则将发生变化，请按任意键继续。');
+          }
         }
       }
       if (!aborted) {
