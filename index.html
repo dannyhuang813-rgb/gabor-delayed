@@ -266,7 +266,9 @@
       2: [{ key: 'II2', blocks: 5 }]
     };
 
-    const II_SINGLE_DIM_MAX_ACCURACY = 0.65;
+    const II_SINGLE_DIM_MAX_ACCURACY = 0.60;
+    const ORI_ONLY_MAX_ACCURACY = 0.55;
+    const SF_ONLY_MAX_ACCURACY = 0.55;
     const II_MAX_PLAN_ATTEMPTS = 30;
 
     const DELAYED_STAGE_MS = 2000;
@@ -285,20 +287,20 @@
     const II_BLOCK_COUNT = 5;
     const II_TRIALS_PER_BLOCK = N_II / II_BLOCK_COUNT;
     // 二维高斯参数：定义在标准化潜在空间 (x=sf, y=ori)，取值约 [-2,2]
-    // RB：两类在单一维度（Session1: y，Session2: x）方向上分离，另一维完全重叠 → 纯一维规则
+    // RB：两类在单一维度（ori 偏离量）方向上分离，另一维完全重叠 → 纯一维规则
     const RB_GAUSS_PARAMS = {
-      // Session 1：仅 y（ori 偏离量）决定类别，x 维（sf）保持重叠
+      // Session 1：|ori| 越小越可能是 A，阈值由 rbOriThresholdDeg 控制
       1: {
         classes: {
           A: { mean: [0, 0.0], cov: [[0.30, 0], [0, 0.14]] },
           B: { mean: [0, 1.3], cov: [[0.30, 0], [0, 0.14]] }
         }
       },
-      // Session 2：仅 x（sf）决定类别，y 维（ori）完全重叠
+      // Session 2：与 Session1 镜像，但标签对调 → |ori| 小的为 B，|ori| 大的为 A
       2: {
         classes: {
-          A: { mean: [-0.95, 0], cov: [[0.20, 0], [0, 0.30]] },
-          B: { mean: [0.95, 0], cov: [[0.20, 0], [0, 0.30]] }
+          A: { mean: [0, 1.3], cov: [[0.30, 0], [0, 0.14]] },
+          B: { mean: [0, 0.0], cov: [[0.30, 0], [0, 0.14]] }
         }
       }
     };
@@ -307,18 +309,20 @@
       1: {
         structureKey: 'II1',
         classes: {
-          A: { mean: [-0.75, 0.85], cov: [[0.35, 0.12], [0.12, 0.35]] },
-          B: { mean: [0.75, -0.85], cov: [[0.35, 0.12], [0.12, 0.35]] }
+          A: { mean: [-0.95, 0.35], cov: [[0.45, 0.08], [0.08, 0.28]] },
+          B: { mean: [0.95, -0.35], cov: [[0.45, 0.08], [0.08, 0.28]] }
         }
       },
       2: {
         structureKey: 'II2',
         classes: {
-          A: { mean: [-0.75, -0.85], cov: [[0.35, -0.12], [-0.12, 0.35]] },
-          B: { mean: [0.75, 0.85], cov: [[0.35, -0.12], [-0.12, 0.35]] }
+          A: { mean: [-0.95, -0.35], cov: [[0.45, -0.08], [-0.08, 0.28]] },
+          B: { mean: [0.95, 0.35], cov: [[0.45, -0.08], [-0.08, 0.28]] }
         }
       }
     };
+    // 上述高斯在初始化后得出的线性判定公式约为：
+    // II1: score = -4.92 * x + 3.90 * y - 6.04；II2: score = -4.92 * x - 3.90 * y - 6.04。
 
     function initializeGaussianBoundaries() {
       Object.values(II_GAUSS_PARAMS).forEach(cfg => {
@@ -565,24 +569,24 @@
       const planTemplate = II_STRUCTURE_PLANS[sessionIndex];
       if (!planTemplate) {
         console.error(`未为 session ${sessionIndex} 定义 II 计划模板`);
-        return { rbRule: sessionIndex === 2 ? 'SF_HIGH' : 'ORI_NEAR', iiPlan: [] };
+        return { rbRule: sessionIndex === 2 ? 'ORI_NEAR_B' : 'ORI_NEAR_A', iiPlan: [] };
       }
       const iiPlan = planTemplate.map(item => ({ ...item }));
       if (sessionIndex === 2) {
-        return { rbRule: 'SF_HIGH', iiPlan };
+        return { rbRule: 'ORI_NEAR_B', iiPlan };
       }
-      return { rbRule: 'ORI_NEAR', iiPlan };
+      return { rbRule: 'ORI_NEAR_A', iiPlan };
     }
 
     // -------------------------
     // Labeling functions
     // -------------------------
     function labelRB(sfLines, oriDeg, rbRule) {
-      if (rbRule === 'ORI_NEAR') {
+      if (rbRule === 'ORI_NEAR_A') {
         return Math.abs(oriDeg) < rbOriThresholdDeg ? 'A' : 'B';
       }
-      if (rbRule === 'SF_HIGH') {
-        return sfLines >= rbSfThreshold ? 'A' : 'B';
+      if (rbRule === 'ORI_NEAR_B') {
+        return Math.abs(oriDeg) < rbOriThresholdDeg ? 'B' : 'A';
       }
       return Math.abs(oriDeg) < rbOriThresholdDeg ? 'A' : 'B';
     }
@@ -861,7 +865,7 @@
       const config = RB_GAUSS_PARAMS[sessionIndex];
       if (!config) return [];
       const rng = hashString(`GAUSS_RB_SESSION${sessionIndex}`);
-      const rule = sessionIndex === 1 ? 'ORI_NEAR' : 'SF_HIGH';
+      const rule = sessionIndex === 1 ? 'ORI_NEAR_A' : 'ORI_NEAR_B';
       const perLabel = N_RB / 2;
       const labelCounts = { A: 0, B: 0 };
       const trials = [];
@@ -875,7 +879,7 @@
         const latent = sampleLatentPoint(classCfg, rng);
         if (!latent) continue;
         const stim = createStimulusFromLatent(latent);
-        if (sessionIndex === 1) {
+        if (rule === 'ORI_NEAR_A' || rule === 'ORI_NEAR_B') {
           const magnitude = Math.abs(stim.ori);
           const signed = clamp(Math.max(1, magnitude) * (rng() < 0.5 ? -1 : 1), activeOriRange.min, activeOriRange.max);
           stim.ori = Number(signed.toFixed(3));
@@ -987,6 +991,11 @@
       let bestScore = Infinity;
       let bestHeuristic = Infinity;
       let bestRule = '';
+      let bestOriAcc = Infinity;
+      let bestSfAcc = Infinity;
+      let bestOriRule = '';
+      let bestSfRule = '';
+      const failureReasons = new Set();
       for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
         const rng = hashString(`GAUSS_II_SESSION${sessionIndex}_attempt${attempt}`);
         const blocks = [];
@@ -1046,27 +1055,51 @@
           });
           blocks.push(ordered);
         }
-        if (failed) continue;
+        if (failed) {
+          failureReasons.add('sampling');
+          continue;
+        }
         const flat = blocks.flat();
         const heurResult = evaluateSingleDimHeuristics(flat);
         const heur = heurResult.accuracy;
-        const score = heur * 100 + planPenalty;
-        if (heur <= II_SINGLE_DIM_MAX_ACCURACY) {
-          console.log(`II session ${sessionIndex}: 单维启发式最大正确率 ${heur.toFixed(3)} ≤ ${II_SINGLE_DIM_MAX_ACCURACY}，计划得分 ${planPenalty.toFixed(1)}，最易规则=${heurResult.rule}`);
+        const oriOk = heurResult.oriAccuracy <= ORI_ONLY_MAX_ACCURACY;
+        const sfOk = heurResult.sfAccuracy <= SF_ONLY_MAX_ACCURACY;
+        const passesAll = heur <= II_SINGLE_DIM_MAX_ACCURACY && oriOk && sfOk;
+        const score = heur * 100 + planPenalty + Math.max(0, heurResult.oriAccuracy - ORI_ONLY_MAX_ACCURACY) * 200 + Math.max(0, heurResult.sfAccuracy - SF_ONLY_MAX_ACCURACY) * 120;
+        if (passesAll) {
+          console.log(
+            `II session ${sessionIndex}: 单维≤${II_SINGLE_DIM_MAX_ACCURACY} (${heur.toFixed(3)}), ori≤${ORI_ONLY_MAX_ACCURACY} (${heurResult.oriAccuracy.toFixed(3)} via ${heurResult.oriRule}), sf≤${SF_ONLY_MAX_ACCURACY} (${heurResult.sfAccuracy.toFixed(3)} via ${heurResult.sfRule})`
+          );
           return { blocks, heuristic: heur, bestRule: heurResult.rule, passed: true };
         }
+        failureReasons.add('heuristics');
         if (score < bestScore) {
           bestScore = score;
           bestBlocks = blocks;
           bestHeuristic = heur;
           bestRule = heurResult.rule;
+          bestOriAcc = heurResult.oriAccuracy;
+          bestSfAcc = heurResult.sfAccuracy;
+          bestOriRule = heurResult.oriRule;
+          bestSfRule = heurResult.sfRule;
         }
       }
       if (bestBlocks) {
-        console.warn(`II session ${sessionIndex}: 未达到单维阈值 ${II_SINGLE_DIM_MAX_ACCURACY}，使用最佳候选 (max acc=${bestHeuristic.toFixed(3)}, rule=${bestRule})`);
-        return { blocks: bestBlocks, heuristic: bestHeuristic, bestRule, passed: bestHeuristic <= II_SINGLE_DIM_MAX_ACCURACY };
+        const oriDisplay = Number.isFinite(bestOriAcc) ? bestOriAcc : 0;
+        const sfDisplay = Number.isFinite(bestSfAcc) ? bestSfAcc : 0;
+        console.warn(
+          `II session ${sessionIndex}: 未满足全部阈值，使用最佳候选 (overall=${bestHeuristic.toFixed(3)}, ori=${oriDisplay.toFixed(3)} via ${bestOriRule || 'N/A'}, sf=${sfDisplay.toFixed(3)} via ${bestSfRule || 'N/A'})。建议：可增大 FIXED_SF_RANGE/FIXED_ORI_RANGE 或放宽 II_SINGLE_DIM_MAX_ACCURACY/ORI_ONLY_MAX_ACCURACY 常量后重新生成。`
+        );
+        const passedFallback =
+          (bestHeuristic ?? 1) <= II_SINGLE_DIM_MAX_ACCURACY &&
+          (bestOriAcc ?? 1) <= ORI_ONLY_MAX_ACCURACY &&
+          (bestSfAcc ?? 1) <= SF_ONLY_MAX_ACCURACY;
+        return { blocks: bestBlocks, heuristic: bestHeuristic, bestRule, passed: passedFallback };
       }
-      console.error(`II session ${sessionIndex}: 无法生成高斯刺激计划`);
+      const reasonList = Array.from(failureReasons).length ? Array.from(failureReasons).join(',') : '未知原因';
+      console.error(
+        `II session ${sessionIndex}: 无法生成高斯刺激计划（原因：${reasonList}）。请尝试扩大 FIXED_SF_RANGE/FIXED_ORI_RANGE 或提高 II_SINGLE_DIM_MAX_ACCURACY 常量以增加可行解。`
+      );
       return { blocks: [], heuristic: 1, bestRule: '', passed: false };
     }
 
@@ -1094,20 +1127,24 @@
     const PRECOMPUTED_GAUSSIAN_STIMULI = precomputeGaussianStimuli();
 
     function makeTrialsRB_balancedV3(participantId, rbRule) {
-      const sessionIndex = rbRule === 'ORI_NEAR' ? 1 : 2;
+      const sessionIndex = rbRule === 'ORI_NEAR_B' ? 2 : 1;
       const blocks = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.RB || [];
       return cloneBlocks(blocks);
     }
 
     function evaluateSingleDimHeuristics(trials) {
       if (!trials || trials.length === 0) {
-        return { accuracy: 0, rule: '' };
+        return { accuracy: 0, rule: '', sfAccuracy: 0, sfRule: '', oriAccuracy: 0, oriRule: '' };
       }
       const total = trials.length;
       let bestAccuracy = 0;
       let bestRule = '';
+      let bestSfAccuracy = 0;
+      let bestSfRule = '';
+      let bestOriAccuracy = 0;
+      let bestOriRule = '';
 
-      const testRule = (classifier, desc) => {
+      const testRule = (classifier, desc, type) => {
         let correct = 0;
         for (const trial of trials) {
           if (classifier(trial) === trial.label) correct += 1;
@@ -1117,27 +1154,42 @@
           bestAccuracy = acc;
           bestRule = desc;
         }
+        if (type === 'sf' && acc > bestSfAccuracy) {
+          bestSfAccuracy = acc;
+          bestSfRule = desc;
+        }
+        if (type === 'ori' && acc > bestOriAccuracy) {
+          bestOriAccuracy = acc;
+          bestOriRule = desc;
+        }
       };
 
       const uniqueSf = Array.from(new Set(trials.map(t => t.sf))).sort((a, b) => a - b);
       for (let i = 0; i < uniqueSf.length - 1; i++) {
         const th = (uniqueSf[i] + uniqueSf[i + 1]) / 2;
-        testRule(t => (t.sf <= th ? 'A' : 'B'), `sf<=${th.toFixed(2)}→A`);
-        testRule(t => (t.sf <= th ? 'B' : 'A'), `sf<=${th.toFixed(2)}→B`);
+        testRule(t => (t.sf <= th ? 'A' : 'B'), `sf<=${th.toFixed(2)}→A`, 'sf');
+        testRule(t => (t.sf <= th ? 'B' : 'A'), `sf<=${th.toFixed(2)}→B`, 'sf');
       }
 
       const maxAbsOri = Math.ceil(Math.max(...trials.map(t => Math.abs(t.ori))));
       for (let deg = 0; deg <= maxAbsOri; deg++) {
-        testRule(t => (Math.abs(t.ori) <= deg ? 'A' : 'B'), `|ori|<=${deg}→A`);
-        testRule(t => (Math.abs(t.ori) <= deg ? 'B' : 'A'), `|ori|<=${deg}→B`);
+        testRule(t => (Math.abs(t.ori) <= deg ? 'A' : 'B'), `|ori|<=${deg}→A`, 'ori');
+        testRule(t => (Math.abs(t.ori) <= deg ? 'B' : 'A'), `|ori|<=${deg}→B`, 'ori');
       }
 
-      testRule(t => (t.ori >= 0 ? 'A' : 'B'), 'ori≥0→A');
-      testRule(t => (t.ori >= 0 ? 'B' : 'A'), 'ori≥0→B');
-      testRule(t => (t.ori <= 0 ? 'A' : 'B'), 'ori≤0→A');
-      testRule(t => (t.ori <= 0 ? 'B' : 'A'), 'ori≤0→B');
+      testRule(t => (t.ori >= 0 ? 'A' : 'B'), 'ori≥0→A', 'ori');
+      testRule(t => (t.ori >= 0 ? 'B' : 'A'), 'ori≥0→B', 'ori');
+      testRule(t => (t.ori <= 0 ? 'A' : 'B'), 'ori≤0→A', 'ori');
+      testRule(t => (t.ori <= 0 ? 'B' : 'A'), 'ori≤0→B', 'ori');
 
-      return { accuracy: bestAccuracy, rule: bestRule };
+      return {
+        accuracy: bestAccuracy,
+        rule: bestRule,
+        sfAccuracy: bestSfAccuracy,
+        sfRule: bestSfRule,
+        oriAccuracy: bestOriAccuracy,
+        oriRule: bestOriRule
+      };
     }
 
     function makeTrialsII_balancedV3(participantId, plan) {
