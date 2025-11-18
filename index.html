@@ -166,7 +166,7 @@
   <button id="exitButton">退出实验</button>
   <div id="waitOverlay">
     <div class="wait-box">
-      <div id="waitOverlayText">提示：接下来规则将发生变化，请按任意键继续。</div>
+      <div id="waitOverlayText">请按任意键继续。</div>
       <button id="waitOverlayButton">点击继续</button>
     </div>
   </div>
@@ -1232,18 +1232,12 @@
       });
     }
 
-    function describeTask(task) {
-      return task === 'RB' ? '规则型（RB）任务' : '信息整合（II）任务';
+    function buildTaskIntroMessage() {
+      return '这是一个分类学习实验，你需要自己摸索图形属于 A 还是 B。请按任意键继续。';
     }
 
-    function buildTaskIntroMessage(task, orderIndex, totalParts) {
-      const label = describeTask(task);
-      return `第${orderIndex}部分（共${totalParts}部分）：即将开始${label}，请按键盘 A/B 或点击按钮作答。`;
-    }
-
-    function buildRuleChangeMessage(task, orderIndex, totalParts) {
-      const label = describeTask(task);
-      return `提示：规则将发生变化。即将进入第${orderIndex}部分的${label}，请按任意键继续。`;
+    function buildRuleChangeMessage() {
+      return '提示：规则将发生变化，请按任意键继续。';
     }
 
     async function waitAnyKey(message) {
@@ -1466,12 +1460,12 @@
           continue;
         }
         if (t === 0) {
-          await waitAnyKey(buildTaskIntroMessage(task, t + 1, totalTasks));
+          await waitAnyKey(buildTaskIntroMessage());
           if (aborted) break;
         } else {
           const prevTask = participantMeta.taskOrder[t - 1];
           if (task !== prevTask) {
-            await waitAnyKey(buildRuleChangeMessage(task, t + 1, totalTasks));
+            await waitAnyKey(buildRuleChangeMessage());
             if (aborted) break;
           }
         }
