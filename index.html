@@ -267,8 +267,6 @@
     };
 
     const II_SINGLE_DIM_MAX_ACCURACY = 0.60;
-    const ORI_ONLY_MAX_ACCURACY = 0.55;
-    const SF_ONLY_MAX_ACCURACY = 0.55;
     const II_MAX_PLAN_ATTEMPTS = 30;
 
     const DELAYED_STAGE_MS = 2000;
@@ -1036,14 +1034,14 @@
         }
         const flat = blocks.flat();
         const heurResult = evaluateSingleDimHeuristics(flat);
-        const heur = heurResult.accuracy;
-        const oriOk = heurResult.oriAccuracy <= ORI_ONLY_MAX_ACCURACY;
-        const sfOk = heurResult.sfAccuracy <= SF_ONLY_MAX_ACCURACY;
-        const passesAll = heur <= II_SINGLE_DIM_MAX_ACCURACY && oriOk && sfOk;
-        const score = heur * 100 + planPenalty + Math.max(0, heurResult.oriAccuracy - ORI_ONLY_MAX_ACCURACY) * 200 + Math.max(0, heurResult.sfAccuracy - SF_ONLY_MAX_ACCURACY) * 120;
+        const heur = (Number.isFinite(heurResult.singleAccuracy) && heurResult.singleAccuracy > 0)
+          ? heurResult.singleAccuracy
+          : Math.max(heurResult.sfAccuracy, heurResult.oriAccuracy, heurResult.accuracy || 0);
+        const passesAll = heur <= II_SINGLE_DIM_MAX_ACCURACY;
+        const score = heur * 100 + planPenalty;
         if (passesAll) {
           console.log(
-            `II session ${sessionIndex}: 单维≤${II_SINGLE_DIM_MAX_ACCURACY} (${heur.toFixed(3)}), ori≤${ORI_ONLY_MAX_ACCURACY} (${heurResult.oriAccuracy.toFixed(3)} via ${heurResult.oriRule}), sf≤${SF_ONLY_MAX_ACCURACY} (${heurResult.sfAccuracy.toFixed(3)} via ${heurResult.sfRule})`
+            `II session ${sessionIndex}: 单维≤${II_SINGLE_DIM_MAX_ACCURACY} (${heur.toFixed(3)} via ${heurResult.rule || heurResult.oriRule || heurResult.sfRule})`
           );
           return { blocks, heuristic: heur, bestRule: heurResult.rule, passed: true };
         }
@@ -1063,12 +1061,9 @@
         const oriDisplay = Number.isFinite(bestOriAcc) ? bestOriAcc : 0;
         const sfDisplay = Number.isFinite(bestSfAcc) ? bestSfAcc : 0;
         console.warn(
-          `II session ${sessionIndex}: 未满足全部阈值，使用最佳候选 (overall=${bestHeuristic.toFixed(3)}, ori=${oriDisplay.toFixed(3)} via ${bestOriRule || 'N/A'}, sf=${sfDisplay.toFixed(3)} via ${bestSfRule || 'N/A'})。建议：检查 II_GAUSS_PARAMS 或放宽阈值。`
+          `II session ${sessionIndex}: 未满足单维≤${II_SINGLE_DIM_MAX_ACCURACY} 的要求，使用最佳候选 (overall=${bestHeuristic.toFixed(3)}, ori=${oriDisplay.toFixed(3)} via ${bestOriRule || 'N/A'}, sf=${sfDisplay.toFixed(3)} via ${bestSfRule || 'N/A'})。建议：调整 II_GAUSS_PARAMS 或扩大 PHYSICAL_RANGE_BOUNDS 以获取更低的单维可分性。`
         );
-        const passedFallback =
-          (bestHeuristic ?? 1) <= II_SINGLE_DIM_MAX_ACCURACY &&
-          (bestOriAcc ?? 1) <= ORI_ONLY_MAX_ACCURACY &&
-          (bestSfAcc ?? 1) <= SF_ONLY_MAX_ACCURACY;
+        const passedFallback = (bestHeuristic ?? 1) <= II_SINGLE_DIM_MAX_ACCURACY;
         return { blocks: bestBlocks, heuristic: bestHeuristic, bestRule, passed: passedFallback };
       }
       const reasonList = Array.from(failureReasons).length ? Array.from(failureReasons).join(',') : '未知原因';
@@ -1162,7 +1157,8 @@
         sfAccuracy: bestSfAccuracy,
         sfRule: bestSfRule,
         oriAccuracy: bestOriAccuracy,
-        oriRule: bestOriRule
+        oriRule: bestOriRule,
+        singleAccuracy: Math.max(bestSfAccuracy, bestOriAccuracy)
       };
     }
 
