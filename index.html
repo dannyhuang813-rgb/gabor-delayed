@@ -304,25 +304,25 @@
         }
       }
     };
-    // II：两个 Session 使用对称的倾斜均值，协方差共享且带轻微相关，使最优边界必须整合两维
+    // II：两个 Session 使用对称的倾斜均值与相关协方差，确保 sf 维度权重大于 ori，且 ori 必须与 sf 联合判断。
     const II_GAUSS_PARAMS = {
       1: {
         structureKey: 'II1',
         classes: {
-          A: { mean: [-0.95, 0.35], cov: [[0.45, 0.08], [0.08, 0.28]] },
-          B: { mean: [0.95, -0.35], cov: [[0.45, 0.08], [0.08, 0.28]] }
+          A: { mean: [-0.85, 0], cov: [[0.60, 0.32], [0.32, 0.95]] },
+          B: { mean: [0.85, 0], cov: [[0.60, 0.32], [0.32, 0.95]] }
         }
       },
       2: {
         structureKey: 'II2',
         classes: {
-          A: { mean: [-0.95, -0.35], cov: [[0.45, -0.08], [-0.08, 0.28]] },
-          B: { mean: [0.95, 0.35], cov: [[0.45, -0.08], [-0.08, 0.28]] }
+          A: { mean: [-0.85, 0], cov: [[0.60, -0.32], [-0.32, 0.95]] },
+          B: { mean: [0.85, 0], cov: [[0.60, -0.32], [-0.32, 0.95]] }
         }
       }
     };
-    // 上述高斯在初始化后得出的线性判定公式约为：
-    // II1: score = -4.92 * x + 3.90 * y - 6.04；II2: score = -4.92 * x - 3.90 * y - 6.04。
+    // 上述高斯在初始化后得出的线性判定公式示例：
+    // II1: score ≈ w_sf * x + w_ori * y + c，其中 |w_sf| > |w_ori| (约 3:1)；II2 在 y 项上取反。
 
     function initializeGaussianBoundaries() {
       Object.values(II_GAUSS_PARAMS).forEach(cfg => {
@@ -918,68 +918,33 @@
       return blocks;
     }
 
-    function sampleIIStimulusFromGaussian(sessionIndex, label, structure, rng) {
+    function sampleIICandidate(sessionIndex, structure, rng) {
       const config = II_GAUSS_PARAMS[sessionIndex];
       if (!config) return null;
-      const classCfg = config.classes[label];
-      if (!classCfg) return null;
-      const maxAttempts = 5000;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const latent = sampleLatentPoint(classCfg, rng);
-        if (!latent) continue;
-        const stim = createStimulusFromLatent(latent);
-        const binKey = determineBinKey(stim.ori);
-        if (!binKey) continue;
-        const projection = computeIIProjection(stim.sf, stim.ori, structure);
-        const dist = Math.abs(projection.raw) / (projection.norm || 1);
-        const nearFlag = dist <= 0.5 ? 1 : 0;
-        const symbolicFlag = (Math.sign(projection.x) !== 0 && Math.sign(projection.x) === Math.sign(projection.y)) ? 1 : 0;
-        return {
-          sf: stim.sf,
-          ori: stim.ori,
-          binKey,
-          nearFlag,
-          symbolicFlag,
-          label,
-          iiStructure: structure.key,
-          correctKey: label === 'A' ? 'a' : 'b'
-        };
-      }
-      return null;
-    }
-
-    function sampleIIStimulusMatching(sessionIndex, label, structure, targetSf, targetBin, desiredZone, rng) {
-      const config = II_GAUSS_PARAMS[sessionIndex];
-      if (!config) return null;
-      const classCfg = config.classes[label];
-      if (!classCfg) return null;
-      const maxAttempts = desiredZone === 'any' ? 5000 : 8000;
-      const strictLimit = desiredZone === 'any' ? 0 : Math.floor(maxAttempts * 0.6);
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const latent = sampleLatentPoint(classCfg, rng);
-        if (!latent) continue;
-        const stim = createStimulusFromLatent(latent);
-        if (stim.sf !== targetSf) continue;
-        const binKey = determineBinKey(stim.ori);
-        if (binKey !== targetBin) continue;
-        const projection = computeIIProjection(stim.sf, stim.ori, structure);
-        const dist = Math.abs(projection.raw) / (projection.norm || 1);
-        const nearFlag = dist <= 0.5 ? 1 : 0;
-        if (desiredZone === 'near' && attempt < strictLimit && !nearFlag) continue;
-        if (desiredZone === 'far' && attempt < strictLimit && nearFlag) continue;
-        const symbolicFlag = (Math.sign(projection.x) !== 0 && Math.sign(projection.x) === Math.sign(projection.y)) ? 1 : 0;
-        return {
-          sf: stim.sf,
-          ori: stim.ori,
-          binKey,
-          nearFlag,
-          symbolicFlag,
-          label,
-          iiStructure: structure.key,
-          correctKey: label === 'A' ? 'a' : 'b'
-        };
-      }
-      return null;
+      const classKeys = Object.keys(config.classes);
+      if (!classKeys.length) return null;
+      const picked = classKeys[Math.floor(rng() * classKeys.length)];
+      const classCfg = config.classes[picked];
+      const latent = sampleLatentPoint(classCfg, rng);
+      if (!latent) return null;
+      const stim = createStimulusFromLatent(latent);
+      const binKey = determineBinKey(stim.ori);
+      if (!binKey) return null;
+      const label = labelII(stim.sf, stim.ori, structure);
+      const projection = computeIIProjection(stim.sf, stim.ori, structure);
+      const dist = Math.abs(projection.raw) / (projection.norm || 1);
+      const nearFlag = dist <= 0.5 ? 1 : 0;
+      const symbolicFlag = (Math.sign(projection.x) !== 0 && Math.sign(projection.x) === Math.sign(projection.y)) ? 1 : 0;
+      return {
+        sf: stim.sf,
+        ori: stim.ori,
+        binKey,
+        nearFlag,
+        symbolicFlag,
+        label,
+        iiStructure: structure.key,
+        correctKey: label === 'A' ? 'a' : 'b'
+      };
     }
 
     function generateGaussianIIBlocks(sessionIndex) {
@@ -987,6 +952,13 @@
       if (!config) return { blocks: [], heuristic: 1, passed: false };
       const structure = getIIStructureConfig(config.structureKey);
       if (!structure) return { blocks: [], heuristic: 1, passed: false };
+      const sfLevels = getActiveSfLevels();
+      const signKeys = ['pos', 'neg'];
+      const perLabel = II_TRIALS_PER_BLOCK / 2;
+      const targetPerSf = perLabel / sfLevels.length;
+      const targetPerBin = perLabel / II_BIN_KEYS.length;
+      const targetPerSign = perLabel / signKeys.length;
+      const zeroMap = keys => Object.fromEntries(keys.map(key => [key, 0]));
       let bestBlocks = null;
       let bestScore = Infinity;
       let bestHeuristic = Infinity;
@@ -1003,51 +975,54 @@
         let failed = false;
         for (let blockIdx = 0; blockIdx < II_BLOCK_COUNT; blockIdx++) {
           const blockTrials = [];
-          const labelCounts = { A: 0, B: 0 };
-          const sfCounts = Object.fromEntries(getActiveSfLevels().map(level => [level, 0]));
-          const binCounts = { b1: 0, b2: 0, b3: 0 };
-          const comboCounts = {};
-          const guardLimit = II_TRIALS_PER_BLOCK * 800;
+          const counts = {
+            totals: { A: 0, B: 0 },
+            sf: { A: zeroMap(sfLevels), B: zeroMap(sfLevels) },
+            bin: { A: zeroMap(II_BIN_KEYS), B: zeroMap(II_BIN_KEYS) },
+            sign: { A: zeroMap(signKeys), B: zeroMap(signKeys) }
+          };
+          let relax = 0;
           let guard = 0;
-          while (blockTrials.length < II_TRIALS_PER_BLOCK && guard < guardLimit) {
+          while (blockTrials.length < II_TRIALS_PER_BLOCK && relax <= 3) {
+            if (guard >= II_TRIALS_PER_BLOCK * 1200) {
+              relax += 1;
+              guard = 0;
+              continue;
+            }
             guard += 1;
-            const targetLabel = labelCounts.A <= labelCounts.B ? 'A' : 'B';
-            const sfLevels = getActiveSfLevels();
-            const targetSf = sfLevels[Math.floor(rng() * sfLevels.length)];
-            const targetBin = II_BIN_KEYS[Math.floor(rng() * II_BIN_KEYS.length)];
-            const stim = sampleIIStimulusMatching(sessionIndex, targetLabel, structure, targetSf, targetBin, 'any', rng);
+            const stim = sampleIICandidate(sessionIndex, structure, rng);
             if (!stim) continue;
-            blockTrials.push(stim);
-            labelCounts[stim.label] += 1;
-            sfCounts[stim.sf] += 1;
-            binCounts[stim.binKey] += 1;
-            const comboKey = `${stim.sf}_${stim.binKey}_${stim.label}`;
-            comboCounts[comboKey] = (comboCounts[comboKey] || 0) + 1;
+            const label = stim.label;
+            const signKey = stim.ori >= 0 ? 'pos' : 'neg';
+            const limitsMet =
+              counts.totals[label] < perLabel + relax &&
+              counts.sf[label][stim.sf] < targetPerSf + relax &&
+              counts.bin[label][stim.binKey] < targetPerBin + relax &&
+              counts.sign[label][signKey] < targetPerSign + relax;
+            if (!limitsMet) continue;
+            counts.totals[label] += 1;
+            counts.sf[label][stim.sf] += 1;
+            counts.bin[label][stim.binKey] += 1;
+            counts.sign[label][signKey] += 1;
+            blockTrials.push({ ...stim });
           }
           if (blockTrials.length !== II_TRIALS_PER_BLOCK) {
             failed = true;
             break;
           }
-          const sfIdeal = II_TRIALS_PER_BLOCK / getActiveSfLevels().length;
-          const binIdeal = II_TRIALS_PER_BLOCK / II_BIN_KEYS.length;
-          let blockPenalty = 0;
-          getActiveSfLevels().forEach(sf => {
-            blockPenalty += Math.abs(sfCounts[sf] - sfIdeal);
+          sfLevels.forEach(sf => {
+            planPenalty += Math.abs(counts.sf.A[sf] - targetPerSf) + Math.abs(counts.sf.B[sf] - targetPerSf);
           });
           II_BIN_KEYS.forEach(binKey => {
-            blockPenalty += Math.abs(binCounts[binKey] - binIdeal);
+            planPenalty += Math.abs(counts.bin.A[binKey] - targetPerBin) + Math.abs(counts.bin.B[binKey] - targetPerBin);
           });
-          getActiveSfLevels().forEach(sf => {
-            II_BIN_KEYS.forEach(binKey => {
-              II_LABELS.forEach(label => {
-                if (!comboCounts[`${sf}_${binKey}_${label}`]) {
-                  blockPenalty += 2;
-                }
-              });
-            });
+          signKeys.forEach(sign => {
+            planPenalty += Math.abs(counts.sign.A[sign] - targetPerSign) + Math.abs(counts.sign.B[sign] - targetPerSign);
           });
-          planPenalty += blockPenalty;
-          const ordered = shuffleIIBlockTrialsWithAntiStreak(blockTrials, `GAUSS_II_SESSION${sessionIndex}_block${blockIdx}_attempt${attempt}`);
+          const ordered = shuffleIIBlockTrialsWithAntiStreak(
+            blockTrials,
+            `GAUSS_II_SESSION${sessionIndex}_block${blockIdx}_attempt${attempt}`
+          );
           ordered.forEach((trial, idx) => {
             trial.blockName = `II-${blocks.length + 1}`;
             trial.blockIndex = blocks.length + 1;
@@ -1088,7 +1063,7 @@
         const oriDisplay = Number.isFinite(bestOriAcc) ? bestOriAcc : 0;
         const sfDisplay = Number.isFinite(bestSfAcc) ? bestSfAcc : 0;
         console.warn(
-          `II session ${sessionIndex}: 未满足全部阈值，使用最佳候选 (overall=${bestHeuristic.toFixed(3)}, ori=${oriDisplay.toFixed(3)} via ${bestOriRule || 'N/A'}, sf=${sfDisplay.toFixed(3)} via ${bestSfRule || 'N/A'})。建议：可增大 FIXED_SF_RANGE/FIXED_ORI_RANGE 或放宽 II_SINGLE_DIM_MAX_ACCURACY/ORI_ONLY_MAX_ACCURACY 常量后重新生成。`
+          `II session ${sessionIndex}: 未满足全部阈值，使用最佳候选 (overall=${bestHeuristic.toFixed(3)}, ori=${oriDisplay.toFixed(3)} via ${bestOriRule || 'N/A'}, sf=${sfDisplay.toFixed(3)} via ${bestSfRule || 'N/A'})。建议：检查 II_GAUSS_PARAMS 或放宽阈值。`
         );
         const passedFallback =
           (bestHeuristic ?? 1) <= II_SINGLE_DIM_MAX_ACCURACY &&
@@ -1098,11 +1073,10 @@
       }
       const reasonList = Array.from(failureReasons).length ? Array.from(failureReasons).join(',') : '未知原因';
       console.error(
-        `II session ${sessionIndex}: 无法生成高斯刺激计划（原因：${reasonList}）。请尝试扩大 FIXED_SF_RANGE/FIXED_ORI_RANGE 或提高 II_SINGLE_DIM_MAX_ACCURACY 常量以增加可行解。`
+        `II session ${sessionIndex}: 无法生成高斯刺激计划（原因：${reasonList}）。请尝试调整 II_GAUSS_PARAMS 或阈值设定。`
       );
       return { blocks: [], heuristic: 1, bestRule: '', passed: false };
     }
-
     function precomputeGaussianStimuli() {
       lockPhysicalRanges();
       const store = {};
