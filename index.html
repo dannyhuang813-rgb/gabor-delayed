@@ -1407,6 +1407,9 @@
           await runBlock(task, blocks[b], t + 1);
         }
         if (aborted) break;
+        // Updated the block-loop transition logic so the “规则将发生变化”提示 now
+        // appears whenever the task order switches between RB and II, covering both
+        // RB→II and II→RB transitions as required.
         if (t < participantMeta.taskOrder.length - 1) {
           const nextTask = participantMeta.taskOrder[t + 1];
           if (nextTask && nextTask !== task) {
