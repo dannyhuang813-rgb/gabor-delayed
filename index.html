@@ -182,13 +182,69 @@
     const RESP_LIMIT_MS = 3000;
     const FEEDBACK_MS   = 500;
 
-    const ORI_MIN = -15, ORI_MAX = 15;
-    const SF_LINES = [3, 4, 5, 6]; // We store the visible黑白成对条纹数量（cycle count）到 CSV。
+    const BASE_ORI_RANGE = { min: -15, max: 15 };
+    const BASE_SF_RANGE = { min: 3, max: 6 };
+    const BASE_SF_LEVELS = [3, 4, 5, 6];
+
+    const PHYSICAL_RANGE_STEPS = [
+      { sfRange: { min: 3.0, max: 6.0 }, oriRange: { min: -15, max: 15 }, sfLevels: [3, 4, 5, 6] },
+      { sfRange: { min: 2.8, max: 6.4 }, oriRange: { min: -18, max: 18 }, sfLevels: [3, 4, 5, 6, 7] },
+      { sfRange: { min: 2.5, max: 7.0 }, oriRange: { min: -22, max: 22 }, sfLevels: [3, 4, 5, 6, 7] },
+      { sfRange: { min: 2.2, max: 7.5 }, oriRange: { min: -26, max: 26 }, sfLevels: [3, 4, 5, 6, 7, 8] },
+      { sfRange: { min: 2.0, max: 8.0 }, oriRange: { min: -30, max: 30 }, sfLevels: [3, 4, 5, 6, 7, 8] }
+    ];
+
+    let activeSfRange = { ...BASE_SF_RANGE };
+    let activeOriRange = { ...BASE_ORI_RANGE };
+    let activeSfLevels = [...BASE_SF_LEVELS];
 
     const ORI_JITTER = 0.5;
 
-    const RB_ORI_THRESHOLD_DEG = 7;
-    const RB_SF_THRESHOLD = 4.5; // sf>=4.5(≈5/6) → A when RB rule relies on density
+    let rbOriThresholdDeg = 7;
+    let rbSfThreshold = 4.5;
+
+    let dynamicBinRanges = null;
+
+    function buildBinRangesFromOri(range) {
+      const absMax = Math.abs(range.max);
+      const step = absMax / 3;
+      return {
+        b1: { min: 0, max: step },
+        b2: { min: step, max: step * 2 },
+        b3: { min: step * 2, max: absMax }
+      };
+    }
+
+    function recomputeDerivedPhysicalSettings() {
+      const absMax = Math.abs(activeOriRange.max);
+      rbOriThresholdDeg = Math.max(1, Math.round(absMax * 0.5 * 10) / 10);
+      rbSfThreshold = Number(((activeSfRange.min + activeSfRange.max) / 2).toFixed(3));
+      dynamicBinRanges = buildBinRangesFromOri(activeOriRange);
+    }
+
+    recomputeDerivedPhysicalSettings();
+
+    function getActiveSfLevels() {
+      return activeSfLevels;
+    }
+
+    function setActivePhysicalRanges(candidate) {
+      if (!candidate) return;
+      activeSfRange = { ...candidate.sfRange };
+      activeOriRange = { ...candidate.oriRange };
+      activeSfLevels = [...candidate.sfLevels];
+      recomputeDerivedPhysicalSettings();
+    }
+
+    function getActiveRangeDescriptor() {
+      return {
+        sfRange: { ...activeSfRange },
+        oriRange: { ...activeOriRange },
+        sfLevels: [...activeSfLevels]
+      };
+    }
+
+    let lastStimulusPlanMeta = { rangeChoice: getActiveRangeDescriptor(), heuristics: {} };
 
     const ORDER_CODE_PLANS = {
       '1': {
@@ -210,8 +266,8 @@
     };
 
     const II_STRUCTURES_LIBRARY = {
-      II1: { key: 'II1', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.0, oriSign: 1 },
-      II2: { key: 'II2', weights: { wsf: 0.5, wori: 0.5 }, bias: 0.0, oriSign: -1 }
+      II1: { key: 'II1', boundary: null },
+      II2: { key: 'II2', boundary: null }
     };
 
     const II_STRUCTURE_PLANS = {
@@ -225,11 +281,6 @@
     const DELAYED_STAGE_MS = 2000;
 
     const II_BIN_KEYS = ['b1', 'b2', 'b3'];
-    const II_BIN_RANGES = {
-      b1: { min: 1, max: 5 },
-      b2: { min: 6, max: 10 },
-      b3: { min: 11, max: 15 }
-    };
     const II_LABELS = ['A', 'B'];
 
     const CSV_HEADER = [
@@ -238,8 +289,6 @@
     ];
 
     const LATENT_RANGE = { xMin: -2, xMax: 2, yMin: -2, yMax: 2 };
-    const SF_PHYSICAL_RANGE = { min: 2.8, max: 6.2 };
-    const ORI_PHYSICAL_RANGE = { min: -15, max: 15 };
     const RB_BLOCK_COUNT = 5;
     const RB_TRIALS_PER_BLOCK = N_RB / RB_BLOCK_COUNT;
     const II_BLOCK_COUNT = 5;
@@ -247,40 +296,50 @@
     // 二维高斯参数：定义在标准化潜在空间 (x=sf, y=ori)，取值约 [-2,2]
     // RB：两类在单一维度（Session1: y，Session2: x）方向上分离，另一维完全重叠 → 纯一维规则
     const RB_GAUSS_PARAMS = {
-      // Session 1：仅 y（ori magnitude）决定类别，x 维完全重叠
+      // Session 1：仅 y（ori 偏离量）决定类别，x 维（sf）保持重叠
       1: {
         classes: {
-          A: { mean: [0, 0.0], cov: [[0.25, 0], [0, 0.12]] },
-          B: { mean: [0, 1.3], cov: [[0.25, 0], [0, 0.12]] }
+          A: { mean: [0, 0.0], cov: [[0.30, 0], [0, 0.14]] },
+          B: { mean: [0, 1.3], cov: [[0.30, 0], [0, 0.14]] }
         }
       },
-      // Session 2：仅 x（sf）决定类别，y 维完全重叠
+      // Session 2：仅 x（sf）决定类别，y 维（ori）完全重叠
       2: {
         classes: {
-          A: { mean: [-0.9, 0], cov: [[0.16, 0], [0, 0.25]] },
-          B: { mean: [0.9, 0], cov: [[0.16, 0], [0, 0.25]] }
+          A: { mean: [-0.95, 0], cov: [[0.20, 0], [0, 0.30]] },
+          B: { mean: [0.95, 0], cov: [[0.20, 0], [0, 0.30]] }
         }
       }
     };
-    // II：两个 Session 使用对称但倾斜的类别均值，协方差带轻微相关，确保最优边界为斜线且两维都需整合
+    // II：两个 Session 使用对称的倾斜均值，协方差共享且带轻微相关，使最优边界必须整合两维
     const II_GAUSS_PARAMS = {
-      // Session 1：对角线结构，权重均衡且 y 维均值差极小，必须整合 sf+ori
       1: {
         structureKey: 'II1',
         classes: {
-          A: { mean: [-0.9, 0.1], cov: [[0.36, 0.12], [0.12, 0.36]] },
-          B: { mean: [0.9, -0.1], cov: [[0.36, 0.12], [0.12, 0.36]] }
+          A: { mean: [-0.75, 0.85], cov: [[0.35, 0.12], [0.12, 0.35]] },
+          B: { mean: [0.75, -0.85], cov: [[0.35, 0.12], [0.12, 0.35]] }
         }
       },
-      // Session 2：镜像结构，ori 项翻转（oriSign=-1），难度与 Session1 对称
       2: {
         structureKey: 'II2',
         classes: {
-          A: { mean: [-0.9, -0.1], cov: [[0.36, -0.12], [-0.12, 0.36]] },
-          B: { mean: [0.9, 0.1], cov: [[0.36, -0.12], [-0.12, 0.36]] }
+          A: { mean: [-0.75, -0.85], cov: [[0.35, -0.12], [-0.12, 0.35]] },
+          B: { mean: [0.75, 0.85], cov: [[0.35, -0.12], [-0.12, 0.35]] }
         }
       }
     };
+
+    function initializeGaussianBoundaries() {
+      Object.values(II_GAUSS_PARAMS).forEach(cfg => {
+        const boundary = computeBayesBoundaryFromGaussians(cfg.classes.A, cfg.classes.B);
+        cfg.boundary = boundary;
+        if (cfg.structureKey && II_STRUCTURES_LIBRARY[cfg.structureKey]) {
+          II_STRUCTURES_LIBRARY[cfg.structureKey].boundary = boundary;
+        }
+      });
+    }
+
+    initializeGaussianBoundaries();
 
     // -------------------------
     // DOM references
@@ -337,10 +396,11 @@
     }
 
     function determineBinKey(ori) {
+      if (!dynamicBinRanges) return null;
       const absMag = Math.abs(ori);
-      if (absMag <= 5) return 'b1';
-      if (absMag <= 10) return 'b2';
-      if (absMag <= 15) return 'b3';
+      if (absMag <= dynamicBinRanges.b1.max) return 'b1';
+      if (absMag <= dynamicBinRanges.b2.max) return 'b2';
+      if (absMag <= dynamicBinRanges.b3.max + 1e-6) return 'b3';
       return null;
     }
 
@@ -434,7 +494,7 @@
         total: trials.length,
         countA: 0,
         countB: 0,
-        sfCounts: { 3: 0, 4: 0, 5: 0, 6: 0 },
+        sfCounts: Object.fromEntries(getActiveSfLevels().map(level => [level, 0])),
         binCounts: { b1: 0, b2: 0, b3: 0 },
         nearCount: 0,
         nearA: 0,
@@ -528,39 +588,41 @@
     // -------------------------
     function labelRB(sfLines, oriDeg, rbRule) {
       if (rbRule === 'ORI_NEAR') {
-        return Math.abs(oriDeg) < RB_ORI_THRESHOLD_DEG ? 'A' : 'B';
+        return Math.abs(oriDeg) < rbOriThresholdDeg ? 'A' : 'B';
       }
       if (rbRule === 'SF_HIGH') {
-        return sfLines >= RB_SF_THRESHOLD ? 'A' : 'B';
+        return sfLines >= rbSfThreshold ? 'A' : 'B';
       }
-      return Math.abs(oriDeg) < RB_ORI_THRESHOLD_DEG ? 'A' : 'B';
+      return Math.abs(oriDeg) < rbOriThresholdDeg ? 'A' : 'B';
     }
 
     function computeIIProjection(sfLines, oriDeg, structure) {
-      const cfg = structure || {};
-      const weights = cfg.weights || { wsf: 0.5, wori: 0.5 };
-      const bias = cfg.bias || 0;
-      const oriSign = cfg.oriSign || 1;
-      const x = (sfLines - 4.5) / 1.5;
-      const yRaw = oriDeg / 15;
-      const y = oriSign * yRaw;
-      const raw = weights.wsf * x + weights.wori * y - bias;
-      const norm = Math.sqrt(weights.wsf * weights.wsf + weights.wori * weights.wori);
-      return { x, y, yRaw, raw, norm };
+      const boundary = structure?.boundary;
+      if (!boundary) {
+        return { x: 0, y: 0, raw: 0, norm: 1 };
+      }
+      const x = mapPhysicalSfToLatent(sfLines);
+      const y = mapPhysicalOriToLatent(oriDeg);
+      const raw = boundary.w1 * x + boundary.w2 * y + boundary.c;
+      return { x, y, raw, norm: boundary.norm };
     }
 
     function labelII(sfLines, oriDeg, structure) {
-      return computeIIProjection(sfLines, oriDeg, structure).raw > 0 ? 'A' : 'B';
+      const boundary = structure?.boundary;
+      const x = mapPhysicalSfToLatent(sfLines);
+      const y = mapPhysicalOriToLatent(oriDeg);
+      return bayesDecision(x, y, boundary);
     }
 
     // -------------------------
     // Stimulus generation helpers
     // -------------------------
     function buildSfSchedule(total, seed) {
-      const perLevel = Math.floor(total / SF_LINES.length);
-      let remainder = total - perLevel * SF_LINES.length;
+      const levels = getActiveSfLevels();
+      const perLevel = Math.floor(total / levels.length);
+      let remainder = total - perLevel * levels.length;
       const schedule = [];
-      for (const sf of SF_LINES) {
+      for (const sf of levels) {
         const count = perLevel + (remainder > 0 ? 1 : 0);
         if (remainder > 0) remainder--;
         for (let i = 0; i < count; i++) {
@@ -651,7 +713,7 @@
       const orientations = [];
       mags.forEach((mag, idx) => {
         const jitter = (rng() * 2 - 1) * jitterMax;
-        const magWithJitter = clamp(mag + jitter, ORI_MIN, ORI_MAX);
+        const magWithJitter = clamp(mag + jitter, activeOriRange.min, activeOriRange.max);
         orientations.push({ ori: magWithJitter, binKey }, { ori: -magWithJitter, binKey });
       });
       shuffleInPlace(orientations, hashString(`${seed}_shuffle`));
@@ -664,11 +726,9 @@
     }
 
     function formatIIStructureFormula(structure) {
-      if (!structure) return '';
-      const weights = structure.weights || { wsf: 0.5, wori: 0.5 };
-      const oriSymbol = structure.oriSign === -1 ? '-y' : 'y';
-      const bias = structure.bias || 0;
-      return `${structure.key}: score = ${weights.wsf.toFixed(2)} * x + ${weights.wori.toFixed(2)} * ${oriSymbol} - ${bias.toFixed(2)} (x=(sf-4.5)/1.5, y=ori/15)`;
+      if (!structure?.boundary) return '';
+      const { w1, w2, c } = structure.boundary;
+      return `${structure.key}: score = ${w1.toFixed(2)} * x + ${w2.toFixed(2)} * y + ${c.toFixed(2)} (x,y 为潜在空间坐标)`;
     }
 
     function linearMap(value, inMin, inMax, outMin, outMax) {
@@ -695,6 +755,39 @@
       ];
     }
 
+    function invert2x2(matrix) {
+      const [[a, b], [c, d]] = matrix;
+      const det = a * d - b * c;
+      if (Math.abs(det) < 1e-6) {
+        return [
+          [1 / Math.max(a, 1e-3), 0],
+          [0, 1 / Math.max(d, 1e-3)]
+        ];
+      }
+      const invDet = 1 / det;
+      return [
+        [d * invDet, -b * invDet],
+        [-c * invDet, a * invDet]
+      ];
+    }
+
+    function computeBayesBoundaryFromGaussians(classA, classB) {
+      const inv = invert2x2(classA.cov);
+      const diff = [classA.mean[0] - classB.mean[0], classA.mean[1] - classB.mean[1]];
+      const w1 = inv[0][0] * diff[0] + inv[0][1] * diff[1];
+      const w2 = inv[1][0] * diff[0] + inv[1][1] * diff[1];
+      const projA = classA.mean[0] * w1 + classA.mean[1] * w2;
+      const projB = classB.mean[0] * w1 + classB.mean[1] * w2;
+      const bias = 0.5 * (projB - projA);
+      const norm = Math.sqrt(w1 * w1 + w2 * w2) || 1;
+      return { w1, w2, c: bias, norm };
+    }
+
+    function bayesDecision(latentX, latentY, boundary) {
+      if (!boundary) return 'A';
+      return (boundary.w1 * latentX + boundary.w2 * latentY + boundary.c) >= 0 ? 'A' : 'B';
+    }
+
     function sampleBivariateNormal(mean, cov, rng) {
       const z0 = sampleStandardNormal(rng);
       const z1 = sampleStandardNormal(rng);
@@ -716,15 +809,32 @@
     }
 
     function mapLatentToPhysical(x, y) {
-      const sf = clamp(linearMap(x, LATENT_RANGE.xMin, LATENT_RANGE.xMax, SF_PHYSICAL_RANGE.min, SF_PHYSICAL_RANGE.max), SF_PHYSICAL_RANGE.min, SF_PHYSICAL_RANGE.max);
-      const ori = clamp(linearMap(y, LATENT_RANGE.yMin, LATENT_RANGE.yMax, ORI_PHYSICAL_RANGE.min, ORI_PHYSICAL_RANGE.max), ORI_PHYSICAL_RANGE.min, ORI_PHYSICAL_RANGE.max);
+      const sf = clamp(linearMap(x, LATENT_RANGE.xMin, LATENT_RANGE.xMax, activeSfRange.min, activeSfRange.max), activeSfRange.min, activeSfRange.max);
+      const ori = clamp(linearMap(y, LATENT_RANGE.yMin, LATENT_RANGE.yMax, activeOriRange.min, activeOriRange.max), activeOriRange.min, activeOriRange.max);
       return { sf, ori };
     }
 
+    function mapPhysicalSfToLatent(sfValue) {
+      return clamp(
+        linearMap(sfValue, activeSfRange.min, activeSfRange.max, LATENT_RANGE.xMin, LATENT_RANGE.xMax),
+        LATENT_RANGE.xMin,
+        LATENT_RANGE.xMax
+      );
+    }
+
+    function mapPhysicalOriToLatent(oriValue) {
+      return clamp(
+        linearMap(oriValue, activeOriRange.min, activeOriRange.max, LATENT_RANGE.yMin, LATENT_RANGE.yMax),
+        LATENT_RANGE.yMin,
+        LATENT_RANGE.yMax
+      );
+    }
+
     function quantizeSfLines(value) {
-      let best = SF_LINES[0];
+      const levels = getActiveSfLevels();
+      let best = levels[0];
       let bestDiff = Infinity;
-      SF_LINES.forEach(target => {
+      levels.forEach(target => {
         const diff = Math.abs(value - target);
         if (diff < bestDiff) {
           bestDiff = diff;
@@ -776,7 +886,7 @@
         const stim = createStimulusFromLatent(latent);
         if (sessionIndex === 1) {
           const magnitude = Math.abs(stim.ori);
-          const signed = clamp(Math.max(1, magnitude) * (rng() < 0.5 ? -1 : 1), ORI_MIN, ORI_MAX);
+          const signed = clamp(Math.max(1, magnitude) * (rng() < 0.5 ? -1 : 1), activeOriRange.min, activeOriRange.max);
           stim.ori = Number(signed.toFixed(3));
         }
         const finalLabel = labelRB(stim.sf, stim.ori, rule);
@@ -879,9 +989,9 @@
 
     function generateGaussianIIBlocks(sessionIndex) {
       const config = II_GAUSS_PARAMS[sessionIndex];
-      if (!config) return [];
+      if (!config) return { blocks: [], heuristic: 1, passed: false };
       const structure = getIIStructureConfig(config.structureKey);
-      if (!structure) return [];
+      if (!structure) return { blocks: [], heuristic: 1, passed: false };
       let bestBlocks = null;
       let bestScore = Infinity;
       let bestHeuristic = Infinity;
@@ -893,7 +1003,7 @@
         for (let blockIdx = 0; blockIdx < II_BLOCK_COUNT; blockIdx++) {
           const blockTrials = [];
           const labelCounts = { A: 0, B: 0 };
-          const sfCounts = { 3: 0, 4: 0, 5: 0, 6: 0 };
+          const sfCounts = Object.fromEntries(getActiveSfLevels().map(level => [level, 0]));
           const binCounts = { b1: 0, b2: 0, b3: 0 };
           const comboCounts = {};
           const guardLimit = II_TRIALS_PER_BLOCK * 800;
@@ -901,7 +1011,8 @@
           while (blockTrials.length < II_TRIALS_PER_BLOCK && guard < guardLimit) {
             guard += 1;
             const targetLabel = labelCounts.A <= labelCounts.B ? 'A' : 'B';
-            const targetSf = SF_LINES[Math.floor(rng() * SF_LINES.length)];
+            const sfLevels = getActiveSfLevels();
+            const targetSf = sfLevels[Math.floor(rng() * sfLevels.length)];
             const targetBin = II_BIN_KEYS[Math.floor(rng() * II_BIN_KEYS.length)];
             const stim = sampleIIStimulusMatching(sessionIndex, targetLabel, structure, targetSf, targetBin, 'any', rng);
             if (!stim) continue;
@@ -916,16 +1027,16 @@
             failed = true;
             break;
           }
-          const sfIdeal = II_TRIALS_PER_BLOCK / SF_LINES.length;
+          const sfIdeal = II_TRIALS_PER_BLOCK / getActiveSfLevels().length;
           const binIdeal = II_TRIALS_PER_BLOCK / II_BIN_KEYS.length;
           let blockPenalty = 0;
-          SF_LINES.forEach(sf => {
+          getActiveSfLevels().forEach(sf => {
             blockPenalty += Math.abs(sfCounts[sf] - sfIdeal);
           });
           II_BIN_KEYS.forEach(binKey => {
             blockPenalty += Math.abs(binCounts[binKey] - binIdeal);
           });
-          SF_LINES.forEach(sf => {
+          getActiveSfLevels().forEach(sf => {
             II_BIN_KEYS.forEach(binKey => {
               II_LABELS.forEach(label => {
                 if (!comboCounts[`${sf}_${binKey}_${label}`]) {
@@ -949,7 +1060,7 @@
         const score = heur * 100 + planPenalty;
         if (heur <= II_SINGLE_DIM_MAX_ACCURACY) {
           console.log(`II session ${sessionIndex}: 单维启发式最大正确率 ${heur.toFixed(3)} ≤ ${II_SINGLE_DIM_MAX_ACCURACY}，计划得分 ${planPenalty.toFixed(1)}`);
-          return blocks;
+          return { blocks, heuristic: heur, passed: true };
         }
         if (score < bestScore) {
           bestScore = score;
@@ -959,21 +1070,63 @@
       }
       if (bestBlocks) {
         console.warn(`II session ${sessionIndex}: 未达到单维阈值 ${II_SINGLE_DIM_MAX_ACCURACY}，使用最佳候选 (max acc=${bestHeuristic.toFixed(3)})`);
-        return bestBlocks;
+        return { blocks: bestBlocks, heuristic: bestHeuristic, passed: bestHeuristic <= II_SINGLE_DIM_MAX_ACCURACY };
       }
       console.error(`II session ${sessionIndex}: 无法生成高斯刺激计划`);
-      return [];
+      return { blocks: [], heuristic: 1, passed: false };
     }
 
     function precomputeGaussianStimuli() {
-      const store = {};
-      [1, 2].forEach(sessionIdx => {
-        store[sessionIdx] = {
-          RB: generateGaussianRBBlocks(sessionIdx),
-          II: generateGaussianIIBlocks(sessionIdx)
-        };
-      });
-      return store;
+      let finalStore = null;
+      let chosenRange = null;
+      let finalHeuristics = {};
+      let bestScore = Infinity;
+      for (let idx = 0; idx < PHYSICAL_RANGE_STEPS.length; idx++) {
+        const candidate = PHYSICAL_RANGE_STEPS[idx];
+        setActivePhysicalRanges(candidate);
+        const store = {};
+        const heuristics = {};
+        let heurSum = 0;
+        let candidateValid = true;
+        let passes = true;
+        for (let sessionIdx = 1; sessionIdx <= 2; sessionIdx++) {
+          const rbBlocks = generateGaussianRBBlocks(sessionIdx);
+          const iiResult = generateGaussianIIBlocks(sessionIdx);
+          if (!rbBlocks.length || !iiResult.blocks.length) {
+            candidateValid = false;
+            break;
+          }
+          heuristics[sessionIdx] = iiResult.heuristic;
+          heurSum += iiResult.heuristic;
+          passes = passes && iiResult.passed;
+          store[sessionIdx] = { RB: rbBlocks, II: iiResult.blocks };
+        }
+        if (!candidateValid) continue;
+        if (passes) {
+          finalStore = store;
+          chosenRange = candidate;
+          finalHeuristics = heuristics;
+          bestScore = heurSum;
+          break;
+        }
+        if (heurSum < bestScore) {
+          finalStore = store;
+          chosenRange = candidate;
+          finalHeuristics = heuristics;
+          bestScore = heurSum;
+        }
+      }
+      if (!finalStore) {
+        console.error('无法预生成刺激：所有范围候选均失败。');
+        const fallbackRange = PHYSICAL_RANGE_STEPS[PHYSICAL_RANGE_STEPS.length - 1];
+        setActivePhysicalRanges(fallbackRange);
+        lastStimulusPlanMeta = { rangeChoice: getActiveRangeDescriptor(), heuristics: {} };
+        return { 1: { RB: [], II: [] }, 2: { RB: [], II: [] } };
+      }
+      setActivePhysicalRanges(chosenRange);
+      lastStimulusPlanMeta = { rangeChoice: getActiveRangeDescriptor(), heuristics: finalHeuristics };
+      console.log('使用的物理范围/离散层级：', lastStimulusPlanMeta.rangeChoice, 'II heuristics=', finalHeuristics);
+      return finalStore;
     }
 
     const PRECOMPUTED_GAUSSIAN_STIMULI = precomputeGaussianStimuli();
@@ -988,14 +1141,16 @@
       if (!trials || trials.length === 0) return 0;
       const total = trials.length;
       const classifiers = [];
-      const sfThresholds = [3.5, 4.5, 5.5];
-      sfThresholds.forEach(th => {
+      const sfLevels = [...getActiveSfLevels()].sort((a, b) => a - b);
+      for (let i = 0; i < sfLevels.length - 1; i++) {
+        const th = (sfLevels[i] + sfLevels[i + 1]) / 2;
         classifiers.push(t => (t.sf <= th ? 'A' : 'B'));
         classifiers.push(t => (t.sf <= th ? 'B' : 'A'));
         classifiers.push(t => (t.sf < th ? 'A' : 'B'));
         classifiers.push(t => (t.sf < th ? 'B' : 'A'));
-      });
-      for (let deg = 1; deg <= 15; deg++) {
+      }
+      const oriLimit = Math.round(Math.abs(activeOriRange.max));
+      for (let deg = 1; deg <= oriLimit; deg++) {
         classifiers.push(t => (Math.abs(t.ori) <= deg ? 'A' : 'B'));
         classifiers.push(t => (Math.abs(t.ori) <= deg ? 'B' : 'A'));
         classifiers.push(t => (t.ori <= deg ? 'A' : 'B'));
@@ -1346,7 +1501,8 @@
         }
       };
       const qcCountsJson = JSON.stringify(qcCountsPayload);
-      console.log(`QC ${currentBlockName}: A=${counts.A}, B=${counts.B}, sf3=${sfCounts[3]}, sf4=${sfCounts[4]}, sf5=${sfCounts[5]}, sf6=${sfCounts[6]}, bin1=${binCounts.b1}, bin2=${binCounts.b2}, bin3=${binCounts.b3}, near=${nearRatioNum.toFixed(3)}, nearA=${nearA}, nearB=${nearB}, farA=${farA}, farB=${farB}, nearSymbolic=${nearSymbolic}`);
+      const sfSummary = getActiveSfLevels().map(level => `sf${level}=${sfCounts[level] || 0}`).join(', ');
+      console.log(`QC ${currentBlockName}: A=${counts.A}, B=${counts.B}, ${sfSummary}, bin1=${binCounts.b1}, bin2=${binCounts.b2}, bin3=${binCounts.b3}, near=${nearRatioNum.toFixed(3)}, nearA=${nearA}, nearB=${nearB}, farA=${farA}, farB=${farB}, nearSymbolic=${nearSymbolic}`);
       for (let i = 0; i < trials.length; i++) {
         if (aborted) break;
         const trial = trials[i];
