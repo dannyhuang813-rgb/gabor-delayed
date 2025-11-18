@@ -182,21 +182,13 @@
     const RESP_LIMIT_MS = 3000;
     const FEEDBACK_MS   = 500;
 
-    const BASE_ORI_RANGE = { min: -15, max: 15 };
-    const BASE_SF_RANGE = { min: 3, max: 6 };
-    const BASE_SF_LEVELS = [3, 4, 5, 6];
+    const FIXED_SF_RANGE = { min: 3, max: 8 };
+    const FIXED_ORI_RANGE = { min: -30, max: 30 };
+    const FIXED_SF_LEVELS = [3, 4, 5, 6, 7, 8];
 
-    const PHYSICAL_RANGE_STEPS = [
-      { sfRange: { min: 3.0, max: 6.0 }, oriRange: { min: -15, max: 15 }, sfLevels: [3, 4, 5, 6] },
-      { sfRange: { min: 2.8, max: 6.4 }, oriRange: { min: -18, max: 18 }, sfLevels: [3, 4, 5, 6, 7] },
-      { sfRange: { min: 2.5, max: 7.0 }, oriRange: { min: -22, max: 22 }, sfLevels: [3, 4, 5, 6, 7] },
-      { sfRange: { min: 2.2, max: 7.5 }, oriRange: { min: -26, max: 26 }, sfLevels: [3, 4, 5, 6, 7, 8] },
-      { sfRange: { min: 2.0, max: 8.0 }, oriRange: { min: -30, max: 30 }, sfLevels: [3, 4, 5, 6, 7, 8] }
-    ];
-
-    let activeSfRange = { ...BASE_SF_RANGE };
-    let activeOriRange = { ...BASE_ORI_RANGE };
-    let activeSfLevels = [...BASE_SF_LEVELS];
+    let activeSfRange = { ...FIXED_SF_RANGE };
+    let activeOriRange = { ...FIXED_ORI_RANGE };
+    let activeSfLevels = [...FIXED_SF_LEVELS];
 
     const ORI_JITTER = 0.5;
 
@@ -222,18 +214,17 @@
       dynamicBinRanges = buildBinRangesFromOri(activeOriRange);
     }
 
-    recomputeDerivedPhysicalSettings();
+    function lockPhysicalRanges() {
+      activeSfRange = { ...FIXED_SF_RANGE };
+      activeOriRange = { ...FIXED_ORI_RANGE };
+      activeSfLevels = [...FIXED_SF_LEVELS];
+      recomputeDerivedPhysicalSettings();
+    }
+
+    lockPhysicalRanges();
 
     function getActiveSfLevels() {
       return activeSfLevels;
-    }
-
-    function setActivePhysicalRanges(candidate) {
-      if (!candidate) return;
-      activeSfRange = { ...candidate.sfRange };
-      activeOriRange = { ...candidate.oriRange };
-      activeSfLevels = [...candidate.sfLevels];
-      recomputeDerivedPhysicalSettings();
     }
 
     function getActiveRangeDescriptor() {
@@ -995,6 +986,7 @@
       let bestBlocks = null;
       let bestScore = Infinity;
       let bestHeuristic = Infinity;
+      let bestRule = '';
       for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
         const rng = hashString(`GAUSS_II_SESSION${sessionIndex}_attempt${attempt}`);
         const blocks = [];
@@ -1056,77 +1048,47 @@
         }
         if (failed) continue;
         const flat = blocks.flat();
-        const heur = evaluateSingleDimHeuristics(flat);
+        const heurResult = evaluateSingleDimHeuristics(flat);
+        const heur = heurResult.accuracy;
         const score = heur * 100 + planPenalty;
         if (heur <= II_SINGLE_DIM_MAX_ACCURACY) {
-          console.log(`II session ${sessionIndex}: 单维启发式最大正确率 ${heur.toFixed(3)} ≤ ${II_SINGLE_DIM_MAX_ACCURACY}，计划得分 ${planPenalty.toFixed(1)}`);
-          return { blocks, heuristic: heur, passed: true };
+          console.log(`II session ${sessionIndex}: 单维启发式最大正确率 ${heur.toFixed(3)} ≤ ${II_SINGLE_DIM_MAX_ACCURACY}，计划得分 ${planPenalty.toFixed(1)}，最易规则=${heurResult.rule}`);
+          return { blocks, heuristic: heur, bestRule: heurResult.rule, passed: true };
         }
         if (score < bestScore) {
           bestScore = score;
           bestBlocks = blocks;
           bestHeuristic = heur;
+          bestRule = heurResult.rule;
         }
       }
       if (bestBlocks) {
-        console.warn(`II session ${sessionIndex}: 未达到单维阈值 ${II_SINGLE_DIM_MAX_ACCURACY}，使用最佳候选 (max acc=${bestHeuristic.toFixed(3)})`);
-        return { blocks: bestBlocks, heuristic: bestHeuristic, passed: bestHeuristic <= II_SINGLE_DIM_MAX_ACCURACY };
+        console.warn(`II session ${sessionIndex}: 未达到单维阈值 ${II_SINGLE_DIM_MAX_ACCURACY}，使用最佳候选 (max acc=${bestHeuristic.toFixed(3)}, rule=${bestRule})`);
+        return { blocks: bestBlocks, heuristic: bestHeuristic, bestRule, passed: bestHeuristic <= II_SINGLE_DIM_MAX_ACCURACY };
       }
       console.error(`II session ${sessionIndex}: 无法生成高斯刺激计划`);
-      return { blocks: [], heuristic: 1, passed: false };
+      return { blocks: [], heuristic: 1, bestRule: '', passed: false };
     }
 
     function precomputeGaussianStimuli() {
-      let finalStore = null;
-      let chosenRange = null;
-      let finalHeuristics = {};
-      let bestScore = Infinity;
-      for (let idx = 0; idx < PHYSICAL_RANGE_STEPS.length; idx++) {
-        const candidate = PHYSICAL_RANGE_STEPS[idx];
-        setActivePhysicalRanges(candidate);
-        const store = {};
-        const heuristics = {};
-        let heurSum = 0;
-        let candidateValid = true;
-        let passes = true;
-        for (let sessionIdx = 1; sessionIdx <= 2; sessionIdx++) {
-          const rbBlocks = generateGaussianRBBlocks(sessionIdx);
-          const iiResult = generateGaussianIIBlocks(sessionIdx);
-          if (!rbBlocks.length || !iiResult.blocks.length) {
-            candidateValid = false;
-            break;
-          }
-          heuristics[sessionIdx] = iiResult.heuristic;
-          heurSum += iiResult.heuristic;
-          passes = passes && iiResult.passed;
-          store[sessionIdx] = { RB: rbBlocks, II: iiResult.blocks };
-        }
-        if (!candidateValid) continue;
-        if (passes) {
-          finalStore = store;
-          chosenRange = candidate;
-          finalHeuristics = heuristics;
-          bestScore = heurSum;
-          break;
-        }
-        if (heurSum < bestScore) {
-          finalStore = store;
-          chosenRange = candidate;
-          finalHeuristics = heuristics;
-          bestScore = heurSum;
+      lockPhysicalRanges();
+      const store = {};
+      const heuristics = {};
+      for (let sessionIdx = 1; sessionIdx <= 2; sessionIdx++) {
+        const rbBlocks = generateGaussianRBBlocks(sessionIdx);
+        const iiResult = generateGaussianIIBlocks(sessionIdx);
+        store[sessionIdx] = {
+          RB: rbBlocks || [],
+          II: iiResult.blocks || []
+        };
+        heuristics[sessionIdx] = iiResult.heuristic ?? 0;
+        if (!rbBlocks.length || !iiResult.blocks.length) {
+          console.error(`Session ${sessionIdx} 的刺激生成存在空集，请检查高斯参数或阈值设置。`);
         }
       }
-      if (!finalStore) {
-        console.error('无法预生成刺激：所有范围候选均失败。');
-        const fallbackRange = PHYSICAL_RANGE_STEPS[PHYSICAL_RANGE_STEPS.length - 1];
-        setActivePhysicalRanges(fallbackRange);
-        lastStimulusPlanMeta = { rangeChoice: getActiveRangeDescriptor(), heuristics: {} };
-        return { 1: { RB: [], II: [] }, 2: { RB: [], II: [] } };
-      }
-      setActivePhysicalRanges(chosenRange);
-      lastStimulusPlanMeta = { rangeChoice: getActiveRangeDescriptor(), heuristics: finalHeuristics };
-      console.log('使用的物理范围/离散层级：', lastStimulusPlanMeta.rangeChoice, 'II heuristics=', finalHeuristics);
-      return finalStore;
+      lastStimulusPlanMeta = { rangeChoice: getActiveRangeDescriptor(), heuristics };
+      console.log('使用统一物理范围生成刺激：', lastStimulusPlanMeta.rangeChoice, 'II heuristics=', heuristics);
+      return store;
     }
 
     const PRECOMPUTED_GAUSSIAN_STIMULI = precomputeGaussianStimuli();
@@ -1138,40 +1100,44 @@
     }
 
     function evaluateSingleDimHeuristics(trials) {
-      if (!trials || trials.length === 0) return 0;
+      if (!trials || trials.length === 0) {
+        return { accuracy: 0, rule: '' };
+      }
       const total = trials.length;
-      const classifiers = [];
-      const sfLevels = [...getActiveSfLevels()].sort((a, b) => a - b);
-      for (let i = 0; i < sfLevels.length - 1; i++) {
-        const th = (sfLevels[i] + sfLevels[i + 1]) / 2;
-        classifiers.push(t => (t.sf <= th ? 'A' : 'B'));
-        classifiers.push(t => (t.sf <= th ? 'B' : 'A'));
-        classifiers.push(t => (t.sf < th ? 'A' : 'B'));
-        classifiers.push(t => (t.sf < th ? 'B' : 'A'));
-      }
-      const oriLimit = Math.round(Math.abs(activeOriRange.max));
-      for (let deg = 1; deg <= oriLimit; deg++) {
-        classifiers.push(t => (Math.abs(t.ori) <= deg ? 'A' : 'B'));
-        classifiers.push(t => (Math.abs(t.ori) <= deg ? 'B' : 'A'));
-        classifiers.push(t => (t.ori <= deg ? 'A' : 'B'));
-        classifiers.push(t => (t.ori <= deg ? 'B' : 'A'));
-        classifiers.push(t => (t.ori >= deg ? 'A' : 'B'));
-        classifiers.push(t => (t.ori >= deg ? 'B' : 'A'));
-      }
-      classifiers.push(t => (t.ori >= 0 ? 'A' : 'B'));
-      classifiers.push(t => (t.ori >= 0 ? 'B' : 'A'));
-      classifiers.push(t => (t.ori <= 0 ? 'A' : 'B'));
-      classifiers.push(t => (t.ori <= 0 ? 'B' : 'A'));
-      let maxAccuracy = 0;
-      classifiers.forEach(fn => {
+      let bestAccuracy = 0;
+      let bestRule = '';
+
+      const testRule = (classifier, desc) => {
         let correct = 0;
         for (const trial of trials) {
-          if (fn(trial) === trial.label) correct += 1;
+          if (classifier(trial) === trial.label) correct += 1;
         }
         const acc = correct / total;
-        if (acc > maxAccuracy) maxAccuracy = acc;
-      });
-      return maxAccuracy;
+        if (acc > bestAccuracy) {
+          bestAccuracy = acc;
+          bestRule = desc;
+        }
+      };
+
+      const uniqueSf = Array.from(new Set(trials.map(t => t.sf))).sort((a, b) => a - b);
+      for (let i = 0; i < uniqueSf.length - 1; i++) {
+        const th = (uniqueSf[i] + uniqueSf[i + 1]) / 2;
+        testRule(t => (t.sf <= th ? 'A' : 'B'), `sf<=${th.toFixed(2)}→A`);
+        testRule(t => (t.sf <= th ? 'B' : 'A'), `sf<=${th.toFixed(2)}→B`);
+      }
+
+      const maxAbsOri = Math.ceil(Math.max(...trials.map(t => Math.abs(t.ori))));
+      for (let deg = 0; deg <= maxAbsOri; deg++) {
+        testRule(t => (Math.abs(t.ori) <= deg ? 'A' : 'B'), `|ori|<=${deg}→A`);
+        testRule(t => (Math.abs(t.ori) <= deg ? 'B' : 'A'), `|ori|<=${deg}→B`);
+      }
+
+      testRule(t => (t.ori >= 0 ? 'A' : 'B'), 'ori≥0→A');
+      testRule(t => (t.ori >= 0 ? 'B' : 'A'), 'ori≥0→B');
+      testRule(t => (t.ori <= 0 ? 'A' : 'B'), 'ori≤0→A');
+      testRule(t => (t.ori <= 0 ? 'B' : 'A'), 'ori≤0→B');
+
+      return { accuracy: bestAccuracy, rule: bestRule };
     }
 
     function makeTrialsII_balancedV3(participantId, plan) {
