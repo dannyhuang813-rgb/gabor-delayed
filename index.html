@@ -306,8 +306,7 @@
     const RB_GEN_MAG_LEVELS = [4, 8, 12, 16, 20, 24, 28];
 
     const II_QC_THRESHOLD = II_SINGLE_DIM_MAX_ACCURACY;
-    const II_NOISE_PROB = 0.15;
-    const II_SF_LEVELS = [3.2, 3.6, 4.0, 4.4, 4.8, 5.2, 5.6];
+    const II_SF_LEVELS = [3, 4, 5, 6];
     const II_MAG_LEVELS = [5, 8, 11, 14, 17, 20, 23, 26];
     const II_GEN_SF_LEVELS = [3.0, 3.6, 4.2, 4.8, 5.4, 6.0];
     const II_GEN_MAG_LEVELS = [6, 10, 14, 18, 22, 26, 30];
@@ -991,29 +990,43 @@
 
     function buildIICandidate(ruleKey, totalCount, seed) {
       const rng = hashString(`${ruleKey}_candidate_${seed}`);
-      const cells = [];
-      II_SF_LEVELS.forEach(sf => {
+      const sfLevels = [...II_SF_LEVELS];
+      const perLabelPerSf = Math.floor(totalCount / (sfLevels.length * II_LABELS.length));
+      const trials = [];
+
+      const combosBySf = new Map();
+      sfLevels.forEach(sf => {
+        const labelMap = { A: [], B: [] };
         II_MAG_LEVELS.forEach(mag => {
-          cells.push({ sf, mag, label: assignIILabel(sf, mag, ruleKey) });
+          const label = assignIILabel(sf, mag, ruleKey);
+          labelMap[label].push({ sf, mag });
+        });
+        combosBySf.set(sf, labelMap);
+      });
+
+      const emitStimulus = (sf, mag, label) => {
+        const sfValue = Number(sf.toFixed(3));
+        const jitteredMag = clamp(mag + gaussianRandom(rng) * 1.0, 3, Math.abs(activeOriRange.max));
+        const sign = rng() < 0.5 ? -1 : 1;
+        const ori = Number((sign * jitteredMag).toFixed(3));
+        trials.push(buildTrialFromStimulus(
+          { sf: sfValue, ori, label },
+          { catType: ruleKey, phase: 'train', iiStructure: ruleKey, nearFlag: 0 }
+        ));
+      };
+
+      sfLevels.forEach(sf => {
+        const labelMap = combosBySf.get(sf);
+        II_LABELS.forEach(label => {
+          const combos = labelMap[label].length ? labelMap[label] : II_MAG_LEVELS.map(mag => ({ sf, mag }));
+          for (let i = 0; i < perLabelPerSf; i++) {
+            const pick = combos[Math.floor(rng() * combos.length)];
+            emitStimulus(pick.sf, pick.mag, label);
+          }
         });
       });
-      const counts = distributeCounts(totalCount, cells.length);
-      const trials = [];
-      cells.forEach((cell, idx) => {
-        const reps = counts[idx];
-        for (let i = 0; i < reps; i++) {
-          const sfNoise = clamp(cell.sf + gaussianRandom(rng) * 0.15, FIXED_SF_RANGE.min, FIXED_SF_RANGE.max);
-          const magNoise = clamp(cell.mag + gaussianRandom(rng) * 1.5, 3, Math.abs(activeOriRange.max));
-          const sign = rng() < 0.5 ? -1 : 1;
-          const ori = Number((sign * magNoise).toFixed(3));
-          const flip = rng() < II_NOISE_PROB;
-          const label = flip ? (cell.label === 'A' ? 'B' : 'A') : cell.label;
-          trials.push(buildTrialFromStimulus(
-            { sf: Number(sfNoise.toFixed(3)), ori, label },
-            { catType: ruleKey, phase: 'train', iiStructure: ruleKey, nearFlag: 0 }
-          ));
-        }
-      });
+
+      ensureTrialCount(trials, totalCount);
       return deterministicShuffle(trials, `${ruleKey}_train_shuffle_${seed}`);
     }
 
@@ -1076,30 +1089,93 @@
       return best;
     }
 
+    function nearestSfLevel(value, levels = II_SF_LEVELS) {
+      let best = levels[0];
+      let bestDiff = Math.abs(value - best);
+      for (let i = 1; i < levels.length; i++) {
+        const diff = Math.abs(value - levels[i]);
+        if (diff < bestDiff) {
+          best = levels[i];
+          bestDiff = diff;
+        }
+      }
+      return Number(best.toFixed(3));
+    }
+
+    function evaluateSfBinBalance(trials) {
+      const sfStats = new Map();
+      const bucketKeys = dynamicBinRanges ? Object.keys(dynamicBinRanges) : [];
+      const bucketStats = {};
+      bucketKeys.forEach(key => {
+        bucketStats[key] = { A: 0, B: 0 };
+      });
+      trials.forEach(trial => {
+        const sfKey = nearestSfLevel(trial.sf);
+        if (!sfStats.has(sfKey)) {
+          sfStats.set(sfKey, { A: 0, B: 0 });
+        }
+        sfStats.get(sfKey)[trial.label] += 1;
+        const binKey = determineBinKey(trial.ori);
+        if (binKey && bucketStats[binKey]) {
+          bucketStats[binKey][trial.label] += 1;
+        }
+      });
+      let sfOk = true;
+      sfStats.forEach(stats => {
+        if (stats.A !== stats.B) {
+          sfOk = false;
+        }
+      });
+      let binOk = true;
+      Object.keys(bucketStats).forEach(key => {
+        const stats = bucketStats[key];
+        const total = stats.A + stats.B;
+        if (total === 0) {
+          binOk = false;
+        } else {
+          const ratio = stats.A / total;
+          if (ratio < 0.4 || ratio > 0.6) {
+            binOk = false;
+          }
+        }
+      });
+      return {
+        sfOk,
+        binOk,
+        sfStats: Object.fromEntries(sfStats),
+        bucketStats
+      };
+    }
+
     function generateIIStimulusSet(catType, seed) {
       let bestTrain = null;
-      let bestHeuristics = null;
+      let bestMeta = null;
       let bestScore = Infinity;
       for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
         const train = buildIICandidate(catType, N_II, `${seed}_${attempt}`);
         const heuristics = qcSingleDimensionForII(train);
+        const balance = evaluateSfBinBalance(train);
         const worst = Math.max(heuristics.maxSfAcc, heuristics.maxAbsOriAcc);
-        if (worst <= II_QC_THRESHOLD) {
+        const passed = worst <= II_QC_THRESHOLD && balance.sfOk && balance.binOk;
+        const compositeScore = passed ? worst : Math.max(worst, balance.sfOk ? 0 : 1, balance.binOk ? 0 : 1);
+        if (passed) {
           const gen = buildIIGeneralization(catType, II_GEN_COUNT, `${seed}_${attempt}`);
-          return { train, gen, heuristics };
+          return { train, gen, heuristics: { ...heuristics, balance } };
         }
-        if (worst < bestScore) {
-          bestScore = worst;
+        if (compositeScore < bestScore) {
+          bestScore = compositeScore;
           bestTrain = train;
-          bestHeuristics = heuristics;
+          bestMeta = { heuristics, balance };
         }
       }
       console.warn(
-        `II ${catType}: 未在 ${II_MAX_PLAN_ATTEMPTS} 次内满足单维≤${II_QC_THRESHOLD}，使用最佳候选`,
-        bestHeuristics
+        `II ${catType}: 未在 ${II_MAX_PLAN_ATTEMPTS} 次内满足单维/分桶约束，使用最佳候选`,
+        bestMeta
       );
       const fallbackGen = buildIIGeneralization(catType, II_GEN_COUNT, `${catType}_fallback`);
-      return { train: bestTrain || [], gen: fallbackGen, heuristics: bestHeuristics || { maxSfAcc: 1, maxAbsOriAcc: 1 } };
+      const heuristics = bestMeta?.heuristics || { maxSfAcc: 1, maxAbsOriAcc: 1 };
+      const balance = bestMeta?.balance || { sfOk: false, binOk: false };
+      return { train: bestTrain || [], gen: fallbackGen, heuristics: { ...heuristics, balance } };
     }
 
     function chunkStimuliForBlocks(stimuli, blockSize, prefix, seedPrefix) {
