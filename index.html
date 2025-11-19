@@ -196,8 +196,6 @@
 
     const ORI_JITTER = 0.5;
 
-    let rbOriThresholdDeg = 40;
-
     let dynamicBinRanges = null;
 
     // 固定预生成的刺激池：每个被试都复用同一套 train/gen 列表
@@ -222,7 +220,6 @@
 
     function recomputeDerivedPhysicalSettings() {
       const absMax = Math.abs(activeOriRange.max);
-      rbOriThresholdDeg = Math.max(1, Math.round(absMax * 0.5 * 10) / 10);
       dynamicBinRanges = buildBinRangesFromOri(activeOriRange);
     }
 
@@ -269,8 +266,8 @@
     };
 
     const II_STRUCTURES_LIBRARY = {
-      II1: { key: 'II1', boundary: null },
-      II2: { key: 'II2', boundary: null }
+      II1: { key: 'II1' },
+      II2: { key: 'II2' }
     };
 
     const II_STRUCTURE_PLANS = {
@@ -278,8 +275,7 @@
       2: [{ key: 'II2', blocks: 5 }]
     };
 
-    const II_SINGLE_DIM_MAX_ACCURACY = 0.60; // 单维阈值：sf-only / |ori|-only 任一不得超过 0.60
-    const II_MAX_PLAN_ATTEMPTS = 500; // 实质上“直到通过”为止，500 次只是防止死循环
+    const II_SINGLE_DIM_MAX_ACCURACY = 0.70;
 
     const DELAYED_STAGE_MS = 2000;
 
@@ -287,35 +283,6 @@
     const II_LABELS = ['A', 'B'];
 
     // Session 1 的 II 配对：按照指令为每个 sf 分配特定的 ori 区间
-    const II_WINDOWS_SESSION1 = {
-      3: { A: [[-10, 0]], B: [[-30, -20]] },
-      4: { A: [[0, 10]], B: [[-20, -10]] },
-      5: { A: [[10, 20]], B: [[-10, 0]] },
-      6: { A: [[20, 30]], B: [[0, 10]] }
-    };
-
-    function flipRange(range) {
-      return [-range[1], -range[0]];
-    }
-
-    function buildSession2Windows(base) {
-      const result = {};
-      Object.keys(base).forEach(sfKey => {
-        const sf = Number(sfKey);
-        const source = base[sf];
-        result[sf] = {
-          A: source.B.map(flipRange),
-          B: source.A.map(flipRange)
-        };
-      });
-      return result;
-    }
-
-    const II_WINDOWS = {
-      1: II_WINDOWS_SESSION1,
-      2: buildSession2Windows(II_WINDOWS_SESSION1)
-    };
-
     const CSV_HEADER = [
       'participant','group','orderCode','serial','sessionIndex','movement','task','iiStructure','orderInSession',
       'blockName','blockIndex','trialIndex','sf','ori','nearFlag','label','correctKey','resp','corr','rt','delayMs','trialStartUTC','qc_near_ratio','qc_counts_json'
@@ -326,26 +293,26 @@
     const RB_TRIALS_PER_BLOCK = N_RB / RB_BLOCK_COUNT;
     const II_BLOCK_COUNT = 5;
     const II_TRIALS_PER_BLOCK = N_II / II_BLOCK_COUNT;
-    // 二维高斯参数：定义在标准化潜在空间 (x=sf, y=ori)，取值约 [-2,2]
-    // RB：两类在单一维度（ori 偏离量）方向上分离，另一维完全重叠 → 纯一维规则
-    const RB_GAUSS_PARAMS = {
-      // Session 1：|ori| 越小越可能是 A，阈值约为 ±40°，高斯仅在 y 轴方向分离
-      1: {
-        classes: {
-          A: { mean: [0, -0.8], cov: [[0.35, 0], [0, 0.25]] },
-          B: { mean: [0, 1.0], cov: [[0.35, 0], [0, 0.25]] }
-        }
-      },
-      // Session 2：沿同一 |ori| 规则，但标签翻转（|ori| 小 → B）
-      2: {
-        classes: {
-          A: { mean: [0, 1.0], cov: [[0.35, 0], [0, 0.25]] },
-          B: { mean: [0, -0.8], cov: [[0.35, 0], [0, 0.25]] }
-        }
-      }
+
+    const RB_RULES = {
+      RB1: { threshold: 12, smallLabel: 'A' },
+      RB2: { threshold: 12, smallLabel: 'B' }
     };
-    // II：两个 Session 使用对称的倾斜均值与相关协方差，确保 sf 维度权重大于 ori，且 ori 必须与 sf 联合判断。
-    // II 采用指令式 sf×ori 窗口，不再依赖潜在空间高斯，因此不需要额外的贝叶斯边界初始化。
+
+    const RB_GEN_SF_LEVELS = [3, 3.5, 4, 4.5, 5, 5.5, 6];
+    const RB_GEN_MAG_LEVELS = [4, 8, 12, 16, 20, 24, 28];
+
+    const II_QC_THRESHOLD = II_SINGLE_DIM_MAX_ACCURACY;
+    const II_NOISE_PROB = 0.15;
+    const II_SF_LEVELS = [3.2, 3.6, 4.0, 4.4, 4.8, 5.2, 5.6];
+    const II_MAG_LEVELS = [5, 8, 11, 14, 17, 20, 23, 26];
+    const II_GEN_SF_LEVELS = [3.0, 3.6, 4.2, 4.8, 5.4, 6.0];
+    const II_GEN_MAG_LEVELS = [6, 10, 14, 18, 22, 26, 30];
+
+    const II_RULES = {
+      II1: { flip: 1 },
+      II2: { flip: -1 }
+    };
 
     // -------------------------
     // DOM references
@@ -580,44 +547,33 @@
       const planTemplate = II_STRUCTURE_PLANS[sessionIndex];
       if (!planTemplate) {
         console.error(`未为 session ${sessionIndex} 定义 II 计划模板`);
-        return { rbRule: sessionIndex === 2 ? 'ORI_NEAR_B' : 'ORI_NEAR_A', iiPlan: [] };
+        return { rbRule: sessionIndex === 2 ? 'RB2' : 'RB1', iiPlan: [] };
       }
       const iiPlan = planTemplate.map(item => ({ ...item }));
-      if (sessionIndex === 2) {
-        return { rbRule: 'ORI_NEAR_B', iiPlan };
-      }
-      return { rbRule: 'ORI_NEAR_A', iiPlan };
+      return { rbRule: sessionIndex === 2 ? 'RB2' : 'RB1', iiPlan };
     }
 
     // -------------------------
     // Labeling functions
     // -------------------------
     function labelRB(sfLines, oriDeg, rbRule) {
-      if (rbRule === 'ORI_NEAR_A') {
-        return Math.abs(oriDeg) < rbOriThresholdDeg ? 'A' : 'B';
-      }
-      if (rbRule === 'ORI_NEAR_B') {
-        return Math.abs(oriDeg) < rbOriThresholdDeg ? 'B' : 'A';
-      }
-      return Math.abs(oriDeg) < rbOriThresholdDeg ? 'A' : 'B';
+      const rule = RB_RULES[rbRule] || RB_RULES.RB1;
+      const smallLabel = rule.smallLabel;
+      return Math.abs(oriDeg) < rule.threshold ? smallLabel : (smallLabel === 'A' ? 'B' : 'A');
     }
 
     function computeIIProjection(sfLines, oriDeg, structure) {
-      const boundary = structure?.boundary;
-      if (!boundary) {
-        return { x: 0, y: 0, raw: 0, norm: 1 };
-      }
-      const x = mapPhysicalSfToLatent(sfLines);
-      const y = mapPhysicalOriToLatent(Math.abs(oriDeg));
-      const raw = boundary.w1 * x + boundary.w2 * y + boundary.c;
-      return { x, y, raw, norm: boundary.norm };
+      const key = structure?.key || 'II1';
+      const s = sfLines - 4.5;
+      const o = Math.abs(oriDeg) - 10;
+      const flip = II_RULES[key]?.flip || 1;
+      const raw = s * o * flip;
+      return { x: s, y: o, raw, norm: 1 };
     }
 
     function labelII(sfLines, oriDeg, structure) {
-      const boundary = structure?.boundary;
-      const x = mapPhysicalSfToLatent(sfLines);
-      const y = mapPhysicalOriToLatent(Math.abs(oriDeg));
-      return bayesDecision(x, y, boundary);
+      const proj = computeIIProjection(sfLines, oriDeg, structure);
+      return proj.raw >= 0 ? 'A' : 'B';
     }
 
     // -------------------------
@@ -947,96 +903,193 @@
       return Number(value.toFixed(3));
     }
 
-    function buildRBPhase(sessionIndex, catType, phase, totalCount, rng) {
+    function gaussianRandom(rng) {
+      let u = 0;
+      let v = 0;
+      while (u === 0) u = rng();
+      while (v === 0) v = rng();
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    }
+
+    function buildRBPool(ruleKey, phase, totalCount, seed) {
+      const rule = RB_RULES[ruleKey];
+      const rng = hashString(`${ruleKey}_${phase}_${seed}`);
       const trials = [];
       const perLabel = Math.floor(totalCount / 2);
-      const absMax = Math.abs(activeOriRange.max);
-      const nearRange = [ORI_MAG_MIN, Math.max(ORI_MAG_MIN + 0.5, rbOriThresholdDeg - 0.2)];
-      const farRange = [rbOriThresholdDeg, absMax];
-      const labelOrder = sessionIndex === 1 ? { A: 'near', B: 'far' } : { A: 'far', B: 'near' };
       const sfLevels = getActiveSfLevels();
       const pickSf = () => sfLevels[Math.floor(rng() * sfLevels.length)];
-      const sampleRBTrial = label => {
-        const magRange = labelOrder[label] === 'near' ? nearRange : farRange;
-        const mag = sampleOrientationFromRange(magRange, rng);
+      const absMax = Math.abs(activeOriRange.max);
+      const margin = 1.5;
+      const nearRange = [3, Math.max(5, rule.threshold - margin)];
+      const farRange = [Math.min(rule.threshold + margin, absMax - 1), absMax];
+      const smallLabel = rule.smallLabel;
+      const largeLabel = smallLabel === 'A' ? 'B' : 'A';
+
+      const emitTrial = (label, range) => {
+        const mag = sampleOrientationFromRange(range, rng);
         const sign = rng() < 0.5 ? -1 : 1;
         const ori = Number((sign * mag).toFixed(3));
         return buildTrialFromStimulus(
           { sf: pickSf(), ori, label },
-          { catType, phase, nearFlag: 0 }
+          { catType: ruleKey, phase, nearFlag: 0 }
         );
       };
+
       for (let i = 0; i < perLabel; i++) {
-        trials.push(sampleRBTrial('A'));
-        trials.push(sampleRBTrial('B'));
+        trials.push(emitTrial(smallLabel, nearRange));
+        trials.push(emitTrial(largeLabel, farRange));
       }
       ensureTrialCount(trials, totalCount);
-      return deterministicShuffle(trials, `${catType}_${phase}_shuffle`);
+      return deterministicShuffle(trials, `${ruleKey}_${phase}_shuffle`);
     }
 
-    function generateRBStimulusSet(sessionIndex, catType, ruleKey, seed) {
-      const rngTrain = hashString(`${catType}_${seed}_train`);
-      const train = buildRBPhase(sessionIndex, catType, 'train', N_RB, rngTrain);
-      const rngGen = hashString(`${catType}_${seed}_gen`);
-      const gen = buildRBPhase(sessionIndex, catType, 'gen', RB_GEN_COUNT, rngGen);
+    function buildRBGeneralization(ruleKey, seed) {
+      const rule = RB_RULES[ruleKey];
+      const combos = [];
+      RB_GEN_SF_LEVELS.forEach(sf => {
+        RB_GEN_MAG_LEVELS.forEach(mag => combos.push({ sf, mag }));
+      });
+      const shuffled = deterministicShuffle(combos, `${ruleKey}_genGrid_${seed}`);
+      const rng = hashString(`${ruleKey}_genSign_${seed}`);
+      const trials = [];
+      for (let i = 0; i < RB_GEN_COUNT; i++) {
+        const combo = shuffled[i % shuffled.length];
+        const labelSmall = rule.smallLabel;
+        const label = combo.mag < rule.threshold ? labelSmall : (labelSmall === 'A' ? 'B' : 'A');
+        const sign = rng() < 0.5 ? -1 : 1;
+        trials.push(buildTrialFromStimulus(
+          { sf: Number(combo.sf.toFixed(3)), ori: Number((sign * combo.mag).toFixed(3)), label },
+          { catType: ruleKey, phase: 'gen', nearFlag: 0 }
+        ));
+      }
+      return trials;
+    }
+
+    function generateRBStimulusSet(catType, seed) {
+      const train = buildRBPool(catType, 'train', N_RB, seed);
+      const gen = buildRBGeneralization(catType, seed);
       return { train, gen };
     }
 
-
-    function buildStructuredIIPhase(sessionIndex, catType, phase, totalCount, rng) {
-      const windows = II_WINDOWS[sessionIndex];
-      if (!windows) return [];
-      const sfLevels = Object.keys(windows).map(Number).sort((a, b) => a - b);
-      const perSfTotals = distributeCounts(totalCount, sfLevels.length);
-      const trials = [];
-      sfLevels.forEach((sf, idx) => {
-        const totalForSf = perSfTotals[idx];
-        let targetA = Math.floor(totalForSf / 2);
-        let targetB = totalForSf - targetA;
-        const emit = (label, target) => {
-          const intervals = windows[sf][label];
-          for (let i = 0; i < target; i++) {
-            const range = intervals[i % intervals.length];
-            const ori = sampleOrientationFromRange(range, rng);
-            const trial = buildTrialFromStimulus(
-              { sf, ori, label },
-              { catType, phase, iiStructure: catType, nearFlag: 0 }
-            );
-            trials.push(trial);
-          }
-        };
-        emit('A', targetA);
-        emit('B', targetB);
-      });
-      return deterministicShuffle(trials, `${catType}_${phase}_structured`);
+    // 非线性乘积规则：d = (sf-4.5) * (|ori|-10)。II1 取 d>=0→A，II2 翻转标签。
+    function assignIILabel(sfValue, oriMag, ruleKey) {
+      const s = sfValue - 4.5;
+      const o = oriMag - 10;
+      const d = s * o * (II_RULES[ruleKey]?.flip || 1);
+      return d >= 0 ? 'A' : 'B';
     }
 
-    function generateIIStimulusSet(sessionIndex, catType, seed) {
-      let bestCandidate = null;
-      let bestHeuristic = Infinity;
-      let bestDetails = null;
+    function buildIICandidate(ruleKey, totalCount, seed) {
+      const rng = hashString(`${ruleKey}_candidate_${seed}`);
+      const cells = [];
+      II_SF_LEVELS.forEach(sf => {
+        II_MAG_LEVELS.forEach(mag => {
+          cells.push({ sf, mag, label: assignIILabel(sf, mag, ruleKey) });
+        });
+      });
+      const counts = distributeCounts(totalCount, cells.length);
+      const trials = [];
+      cells.forEach((cell, idx) => {
+        const reps = counts[idx];
+        for (let i = 0; i < reps; i++) {
+          const sfNoise = clamp(cell.sf + gaussianRandom(rng) * 0.15, FIXED_SF_RANGE.min, FIXED_SF_RANGE.max);
+          const magNoise = clamp(cell.mag + gaussianRandom(rng) * 1.5, 3, Math.abs(activeOriRange.max));
+          const sign = rng() < 0.5 ? -1 : 1;
+          const ori = Number((sign * magNoise).toFixed(3));
+          const flip = rng() < II_NOISE_PROB;
+          const label = flip ? (cell.label === 'A' ? 'B' : 'A') : cell.label;
+          trials.push(buildTrialFromStimulus(
+            { sf: Number(sfNoise.toFixed(3)), ori, label },
+            { catType: ruleKey, phase: 'train', iiStructure: ruleKey, nearFlag: 0 }
+          ));
+        }
+      });
+      return deterministicShuffle(trials, `${ruleKey}_train_shuffle_${seed}`);
+    }
+
+    function buildIIGeneralization(ruleKey, totalCount, seed) {
+      const combos = [];
+      II_GEN_SF_LEVELS.forEach(sf => {
+        II_GEN_MAG_LEVELS.forEach(mag => combos.push({ sf, mag }));
+      });
+      const shuffled = deterministicShuffle(combos, `${ruleKey}_gen_${seed}`);
+      const rng = hashString(`${ruleKey}_genPhase_${seed}`);
+      const trials = [];
+      for (let i = 0; i < totalCount; i++) {
+        const combo = shuffled[i % shuffled.length];
+        const label = assignIILabel(combo.sf, combo.mag, ruleKey);
+        const sign = rng() < 0.5 ? -1 : 1;
+        trials.push(buildTrialFromStimulus(
+          { sf: Number(combo.sf.toFixed(3)), ori: Number((sign * combo.mag).toFixed(3)), label },
+          { catType: ruleKey, phase: 'gen', iiStructure: ruleKey, nearFlag: 0 }
+        ));
+      }
+      return trials;
+    }
+
+    function qcSingleDimensionForII(trials) {
+      if (!trials.length) {
+        return { maxSfAcc: 0, maxAbsOriAcc: 0, singleAccuracy: 0 };
+      }
+      const sfVals = trials.map(t => t.sf);
+      const absOriVals = trials.map(t => Math.abs(t.ori));
+      const labels = trials.map(t => t.label);
+      const maxSfAcc = best1DAcc(sfVals, labels);
+      const maxAbsOriAcc = best1DAcc(absOriVals, labels);
+      return { maxSfAcc, maxAbsOriAcc, singleAccuracy: Math.max(maxSfAcc, maxAbsOriAcc) };
+    }
+
+    function best1DAcc(values, labels) {
+      if (!values.length) return 0;
+      const paired = values.map((value, idx) => ({ value, label: labels[idx] }));
+      paired.sort((a, b) => a.value - b.value);
+      const thresholds = [];
+      for (let i = 0; i < paired.length - 1; i++) {
+        const mid = (paired[i].value + paired[i + 1].value) / 2;
+        thresholds.push(mid);
+      }
+      const minValue = paired[0].value - 0.001;
+      const maxValue = paired[paired.length - 1].value + 0.001;
+      thresholds.push(minValue, maxValue);
+      let best = 0;
+      thresholds.forEach(th => {
+        let correctA = 0;
+        let correctB = 0;
+        for (let i = 0; i < paired.length; i++) {
+          const predictedA = paired[i].value <= th ? 'A' : 'B';
+          if (predictedA === paired[i].label) correctA += 1;
+          const predictedB = paired[i].value <= th ? 'B' : 'A';
+          if (predictedB === paired[i].label) correctB += 1;
+        }
+        best = Math.max(best, correctA / paired.length, correctB / paired.length);
+      });
+      return best;
+    }
+
+    function generateIIStimulusSet(catType, seed) {
+      let bestTrain = null;
+      let bestHeuristics = null;
+      let bestScore = Infinity;
       for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
-        const rngTrain = hashString(`${catType}_${seed}_train_${attempt}`);
-        const train = buildStructuredIIPhase(sessionIndex, catType, 'train', N_II, rngTrain);
-        const heuristics = evaluateSingleDimHeuristics(train);
-        const singleAcc = Math.max(heuristics.sfAccuracy, heuristics.oriAccuracy);
-        if (singleAcc <= II_SINGLE_DIM_MAX_ACCURACY) {
-          const rngGen = hashString(`${catType}_${seed}_gen_${attempt}`);
-          const gen = buildStructuredIIPhase(sessionIndex, catType, 'gen', II_GEN_COUNT, rngGen);
+        const train = buildIICandidate(catType, N_II, `${seed}_${attempt}`);
+        const heuristics = qcSingleDimensionForII(train);
+        const worst = Math.max(heuristics.maxSfAcc, heuristics.maxAbsOriAcc);
+        if (worst <= II_QC_THRESHOLD) {
+          const gen = buildIIGeneralization(catType, II_GEN_COUNT, `${seed}_${attempt}`);
           return { train, gen, heuristics };
         }
-        if (singleAcc < bestHeuristic) {
-          bestCandidate = train;
-          bestHeuristic = singleAcc;
-          bestDetails = heuristics;
+        if (worst < bestScore) {
+          bestScore = worst;
+          bestTrain = train;
+          bestHeuristics = heuristics;
         }
       }
       console.warn(
-        `II ${catType}: 未在 ${II_MAX_PLAN_ATTEMPTS} 次内满足单维≤${II_SINGLE_DIM_MAX_ACCURACY}，使用最佳候选`,
-        bestDetails
+        `II ${catType}: 未在 ${II_MAX_PLAN_ATTEMPTS} 次内满足单维≤${II_QC_THRESHOLD}，使用最佳候选`,
+        bestHeuristics
       );
-      const fallbackGen = buildStructuredIIPhase(sessionIndex, catType, 'gen', II_GEN_COUNT, hashString(`${catType}_${seed}_gen_fallback`));
-      return { train: bestCandidate || [], gen: fallbackGen, heuristics: bestDetails };
+      const fallbackGen = buildIIGeneralization(catType, II_GEN_COUNT, `${catType}_fallback`);
+      return { train: bestTrain || [], gen: fallbackGen, heuristics: bestHeuristics || { maxSfAcc: 1, maxAbsOriAcc: 1 } };
     }
 
     function chunkStimuliForBlocks(stimuli, blockSize, prefix, seedPrefix) {
@@ -1063,18 +1116,18 @@
       return blocks;
     }
 
-    function precomputeGaussianStimuli() {
+    function precomputeFixedStimuli() {
       lockPhysicalRanges();
 
-      const rb1 = generateRBStimulusSet(1, 'RB1', 'ORI_NEAR_A', 'RB1');
-      const rb2 = generateRBStimulusSet(2, 'RB2', 'ORI_NEAR_B', 'RB2');
+      const rb1 = generateRBStimulusSet('RB1', 'RB1');
+      const rb2 = generateRBStimulusSet('RB2', 'RB2');
       STIM_RB1_TRAIN = rb1.train;
       STIM_RB1_GEN = rb1.gen;
       STIM_RB2_TRAIN = rb2.train;
       STIM_RB2_GEN = rb2.gen;
 
-      const ii1 = generateIIStimulusSet(1, 'II1', 'II1');
-      const ii2 = generateIIStimulusSet(2, 'II2', 'II2');
+      const ii1 = generateIIStimulusSet('II1', 'II1');
+      const ii2 = generateIIStimulusSet('II2', 'II2');
       STIM_II1_TRAIN = ii1.train;
       STIM_II1_GEN = ii1.gen;
       STIM_II2_TRAIN = ii2.train;
@@ -1111,73 +1164,16 @@
     }
 
     // experimentInit 之前执行一次，生成全局固定刺激池
-    const PRECOMPUTED_GAUSSIAN_STIMULI = precomputeGaussianStimuli();
+    const PRECOMPUTED_GAUSSIAN_STIMULI = precomputeFixedStimuli();
 
     function makeTrialsRB_balancedV3(participantId, rbRule) {
-      const sessionIndex = rbRule === 'ORI_NEAR_B' ? 2 : 1;
+      const sessionIndex = rbRule === 'RB2' ? 2 : 1;
       const blocks = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.RB || [];
       return cloneBlocks(blocks);
     }
 
     function evaluateSingleDimHeuristics(trials) {
-      if (!trials || trials.length === 0) {
-        return { accuracy: 0, rule: '', sfAccuracy: 0, sfRule: '', oriAccuracy: 0, oriRule: '' };
-      }
-      const total = trials.length;
-      let bestAccuracy = 0;
-      let bestRule = '';
-      let bestSfAccuracy = 0;
-      let bestSfRule = '';
-      let bestOriAccuracy = 0;
-      let bestOriRule = '';
-
-      const testRule = (classifier, desc, type) => {
-        let correct = 0;
-        for (const trial of trials) {
-          if (classifier(trial) === trial.label) correct += 1;
-        }
-        const acc = correct / total;
-        if (acc > bestAccuracy) {
-          bestAccuracy = acc;
-          bestRule = desc;
-        }
-        if (type === 'sf' && acc > bestSfAccuracy) {
-          bestSfAccuracy = acc;
-          bestSfRule = desc;
-        }
-        if (type === 'ori' && acc > bestOriAccuracy) {
-          bestOriAccuracy = acc;
-          bestOriRule = desc;
-        }
-      };
-
-      const uniqueSf = Array.from(new Set(trials.map(t => t.sf))).sort((a, b) => a - b);
-      for (let i = 0; i < uniqueSf.length - 1; i++) {
-        const th = (uniqueSf[i] + uniqueSf[i + 1]) / 2;
-        testRule(t => (t.sf <= th ? 'A' : 'B'), `sf<=${th.toFixed(2)}→A`, 'sf');
-        testRule(t => (t.sf <= th ? 'B' : 'A'), `sf<=${th.toFixed(2)}→B`, 'sf');
-      }
-
-      const maxAbsOri = Math.ceil(Math.max(...trials.map(t => Math.abs(t.ori))));
-      for (let deg = 0; deg <= maxAbsOri; deg++) {
-        testRule(t => (Math.abs(t.ori) <= deg ? 'A' : 'B'), `|ori|<=${deg}→A`, 'ori');
-        testRule(t => (Math.abs(t.ori) <= deg ? 'B' : 'A'), `|ori|<=${deg}→B`, 'ori');
-      }
-
-      testRule(t => (t.ori >= 0 ? 'A' : 'B'), 'ori≥0→A', 'ori');
-      testRule(t => (t.ori >= 0 ? 'B' : 'A'), 'ori≥0→B', 'ori');
-      testRule(t => (t.ori <= 0 ? 'A' : 'B'), 'ori≤0→A', 'ori');
-      testRule(t => (t.ori <= 0 ? 'B' : 'A'), 'ori≤0→B', 'ori');
-
-      return {
-        accuracy: bestAccuracy,
-        rule: bestRule,
-        sfAccuracy: bestSfAccuracy,
-        sfRule: bestSfRule,
-        oriAccuracy: bestOriAccuracy,
-        oriRule: bestOriRule,
-        singleAccuracy: Math.max(bestSfAccuracy, bestOriAccuracy)
-      };
+      return qcSingleDimensionForII(trials);
     }
 
     function makeTrialsII_balancedV3(participantId, plan) {
