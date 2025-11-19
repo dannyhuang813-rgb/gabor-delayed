@@ -292,8 +292,10 @@
     const LATENT_RANGE = { xMin: -2, xMax: 2, yMin: -2, yMax: 2 };
     const RB_BLOCK_COUNT = 5;
     const RB_TRIALS_PER_BLOCK = N_RB / RB_BLOCK_COUNT;
+    const RB_GEN_BLOCK_INDEX = RB_BLOCK_COUNT + 1;
     const II_BLOCK_COUNT = 5;
     const II_TRIALS_PER_BLOCK = N_II / II_BLOCK_COUNT;
+    const II_GEN_BLOCK_INDEX = II_BLOCK_COUNT + 1;
 
     const RB_RULES = {
       RB1: { threshold: 12, smallLabel: 'A' },
@@ -875,6 +877,13 @@
       return blocks.map(block => block.map(trial => ({ ...trial })));
     }
 
+    function cloneBlockSet(blockSet) {
+      return {
+        train: cloneBlocks((blockSet && blockSet.train) || []),
+        gen: cloneBlocks((blockSet && blockSet.gen) || [])
+      };
+    }
+
     function ensureTrialCount(trials, desiredTotal) {
       if (trials.length >= desiredTotal) return;
       if (!trials.length) throw new Error('无法补齐试次数：trial 列表为空');
@@ -1117,6 +1126,20 @@
       return blocks;
     }
 
+    function wrapGeneralizationBlocks(stimuli, blockLabel, seedPrefix, blockIndexValue) {
+      if (!stimuli || !stimuli.length) return [];
+      const shuffled = deterministicShuffle(stimuli, `${seedPrefix}_${blockLabel}_genwrap`);
+      const block = shuffled.map((trial, idx) => ({
+        ...trial,
+        blockName: blockLabel,
+        blockIndex: blockIndexValue,
+        trialIndex: idx + 1,
+        correctKey: trial.label === 'A' ? 'a' : 'b',
+        binKey: determineBinKey(trial.ori)
+      }));
+      return [block];
+    }
+
     function precomputeFixedStimuli() {
       lockPhysicalRanges();
 
@@ -1134,14 +1157,23 @@
       STIM_II2_TRAIN = ii2.train;
       STIM_II2_GEN = ii2.gen;
 
+      const rb1TrainBlocks = chunkStimuliForBlocks(STIM_RB1_TRAIN, RB_TRIALS_PER_BLOCK, 'RB', 'RB1');
+      const rb2TrainBlocks = chunkStimuliForBlocks(STIM_RB2_TRAIN, RB_TRIALS_PER_BLOCK, 'RB', 'RB2');
+      const ii1TrainBlocks = chunkStimuliForBlocks(STIM_II1_TRAIN, II_TRIALS_PER_BLOCK, 'II', 'II1');
+      const ii2TrainBlocks = chunkStimuliForBlocks(STIM_II2_TRAIN, II_TRIALS_PER_BLOCK, 'II', 'II2');
+      const rb1GenBlocks = wrapGeneralizationBlocks(STIM_RB1_GEN, 'RB-GEN', 'RB1', RB_GEN_BLOCK_INDEX);
+      const rb2GenBlocks = wrapGeneralizationBlocks(STIM_RB2_GEN, 'RB-GEN', 'RB2', RB_GEN_BLOCK_INDEX);
+      const ii1GenBlocks = wrapGeneralizationBlocks(STIM_II1_GEN, 'II-GEN', 'II1', II_GEN_BLOCK_INDEX);
+      const ii2GenBlocks = wrapGeneralizationBlocks(STIM_II2_GEN, 'II-GEN', 'II2', II_GEN_BLOCK_INDEX);
+
       const store = {
         1: {
-          RB: chunkStimuliForBlocks(STIM_RB1_TRAIN, RB_TRIALS_PER_BLOCK, 'RB', 'RB1'),
-          II: chunkStimuliForBlocks(STIM_II1_TRAIN, II_TRIALS_PER_BLOCK, 'II', 'II1')
+          RB: { train: rb1TrainBlocks, gen: rb1GenBlocks },
+          II: { train: ii1TrainBlocks, gen: ii1GenBlocks }
         },
         2: {
-          RB: chunkStimuliForBlocks(STIM_RB2_TRAIN, RB_TRIALS_PER_BLOCK, 'RB', 'RB2'),
-          II: chunkStimuliForBlocks(STIM_II2_TRAIN, II_TRIALS_PER_BLOCK, 'II', 'II2')
+          RB: { train: rb2TrainBlocks, gen: rb2GenBlocks },
+          II: { train: ii2TrainBlocks, gen: ii2GenBlocks }
         }
       };
 
@@ -1157,7 +1189,12 @@
         iiTrain: { II1: STIM_II1_TRAIN.length, II2: STIM_II2_TRAIN.length }
       });
 
-      if (!store[1].RB.length || !store[1].II.length || !store[2].RB.length || !store[2].II.length) {
+      if (
+        !store[1].RB.train.length ||
+        !store[1].II.train.length ||
+        !store[2].RB.train.length ||
+        !store[2].II.train.length
+      ) {
         console.error('警告：某些 session 的刺激块为空，请检查高斯参数或采样阈值设置。');
       }
 
@@ -1169,8 +1206,8 @@
 
     function makeTrialsRB_balancedV3(participantId, rbRule) {
       const sessionIndex = rbRule === 'RB2' ? 2 : 1;
-      const blocks = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.RB || [];
-      return cloneBlocks(blocks);
+      const blockSet = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.RB || { train: [], gen: [] };
+      return cloneBlockSet(blockSet);
     }
 
     function evaluateSingleDimHeuristics(trials) {
@@ -1179,12 +1216,12 @@
 
     function makeTrialsII_balancedV3(participantId, plan) {
       if (!Array.isArray(plan) || !plan.length) {
-        return [];
+        return { train: [], gen: [] };
       }
       const key = plan[0]?.key;
       const sessionIndex = key === 'II1' ? 1 : 2;
-      const blocks = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.II || [];
-      return cloneBlocks(blocks);
+      const blockSet = PRECOMPUTED_GAUSSIAN_STIMULI[sessionIndex]?.II || { train: [], gen: [] };
+      return cloneBlockSet(blockSet);
     }
     // -------------------------
     // Stimulus rendering
@@ -1398,6 +1435,11 @@
       return '提示：规则将发生变化，请按任意键继续。';
     }
 
+    function buildGeneralizationIntroMessage(task) {
+      const taskLabel = task === 'RB' ? 'RB' : 'II';
+      return `提示：即将进入无反馈的 ${taskLabel} 检验阶段，请继续按照当前规则作答。按任意键继续。`;
+    }
+
     async function waitAnyKey(message) {
       drawBlank();
       showWaitOverlay(message);
@@ -1466,6 +1508,7 @@
       if (!trials || trials.length === 0) return;
       currentBlockName = trials[0].blockName;
       const blockIndex = trials[0].blockIndex || 1;
+      const noFeedbackBlock = trials.every(trial => trial.phase === 'gen');
       const counts = { A: 0, B: 0 };
       const sfCounts = { 3: 0, 4: 0, 5: 0, 6: 0 };
       const binCounts = { b1: 0, b2: 0, b3: 0 };
@@ -1524,7 +1567,7 @@
         const response = await waitForResponse();
         clearResponseState();
         drawBlank();
-        if (participantMeta.delayMs > 0) {
+        if (!noFeedbackBlock && participantMeta.delayMs > 0) {
           drawFixation();
           await wait(participantMeta.delayMs);
           if (aborted) break;
@@ -1542,8 +1585,10 @@
           respKey = 'NA';
         }
         const corr = respKey === trial.correctKey ? 1 : 0;
-        showFeedback(corr ? 'Right' : 'Wrong', corr ? '#2ecc71' : '#e74c3c');
-        await wait(FEEDBACK_MS);
+        if (!noFeedbackBlock) {
+          showFeedback(corr ? 'Right' : 'Wrong', corr ? '#2ecc71' : '#e74c3c');
+          await wait(FEEDBACK_MS);
+        }
         hideFeedback();
         if (aborted) break;
         dataRows.push([
@@ -1585,17 +1630,17 @@
       dataRows = [];
       resizeCanvas();
       window.addEventListener('resize', resizeCanvas);
-      let rbBlocks = [];
-      let iiBlocks = [];
+      let rbBlockSet = { train: [], gen: [] };
+      let iiBlockSet = { train: [], gen: [] };
       try {
-        rbBlocks = makeTrialsRB_balancedV3(participantId, sessionConfig.rbRule);
-        iiBlocks = makeTrialsII_balancedV3(participantId, sessionConfig.iiPlan);
+        rbBlockSet = makeTrialsRB_balancedV3(participantId, sessionConfig.rbRule);
+        iiBlockSet = makeTrialsII_balancedV3(participantId, sessionConfig.iiPlan);
         const needsRB = participantMeta.taskOrder.includes('RB');
         const needsII = participantMeta.taskOrder.includes('II');
-        if (needsRB && (!rbBlocks || !rbBlocks.length)) {
+        if (needsRB && (!rbBlockSet.train || !rbBlockSet.train.length)) {
           throw new Error('RB 刺激集合为空');
         }
-        if (needsII && (!iiBlocks || !iiBlocks.length)) {
+        if (needsII && (!iiBlockSet.train || !iiBlockSet.train.length)) {
           throw new Error('II 刺激集合为空');
         }
       } catch (err) {
@@ -1609,12 +1654,14 @@
         experimentContainer.style.display = 'none';
         return;
       }
-      const blockStore = { RB: rbBlocks, II: iiBlocks };
+      const blockStore = { RB: rbBlockSet, II: iiBlockSet };
       const totalTasks = participantMeta.taskOrder.length;
       for (let t = 0; t < totalTasks; t++) {
         const task = participantMeta.taskOrder[t];
-        const blocks = blockStore[task] || [];
-        if (!blocks.length) {
+        const blockSet = blockStore[task] || { train: [], gen: [] };
+        const trainBlocks = blockSet.train || [];
+        const genBlocks = blockSet.gen || [];
+        if (!trainBlocks.length) {
           console.warn('未找到任务区块', { task });
           continue;
         }
@@ -1628,9 +1675,18 @@
             if (aborted) break;
           }
         }
-        for (let b = 0; b < blocks.length; b++) {
+        for (let b = 0; b < trainBlocks.length; b++) {
           if (aborted) break;
-          await runBlock(task, blocks[b], t + 1);
+          await runBlock(task, trainBlocks[b], t + 1);
+        }
+        if (aborted) break;
+        if (genBlocks.length) {
+          await waitAnyKey(buildGeneralizationIntroMessage(task));
+          if (aborted) break;
+          for (let g = 0; g < genBlocks.length; g++) {
+            if (aborted) break;
+            await runBlock(task, genBlocks[g], t + 1);
+          }
         }
         if (aborted) break;
       }
