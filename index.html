@@ -1179,19 +1179,39 @@
     }
 
     function chunkStimuliForBlocks(stimuli, blockSize, prefix, seedPrefix) {
-      const shuffled = deterministicShuffle(stimuli, `${seedPrefix}_${prefix}_full`);
-      const blockCount = Math.floor(shuffled.length / blockSize);
+      const blockCount = Math.floor(stimuli.length / blockSize);
+      const halfBlock = blockSize / 2;
+      const labelBuckets = { A: [], B: [] };
+      stimuli.forEach(trial => {
+        if (labelBuckets[trial.label]) {
+          labelBuckets[trial.label].push({ ...trial });
+        }
+      });
+      const requiredPerLabel = blockCount * halfBlock;
+      if (!Number.isInteger(halfBlock)) {
+        throw new Error('blockSize 必须是偶数，以便每个 block A/B 均衡');
+      }
+      if (labelBuckets.A.length < requiredPerLabel || labelBuckets.B.length < requiredPerLabel) {
+        throw new Error('刺激池中 A/B 数量不足，无法保证每个 block 1:1');
+      }
+      const queueA = deterministicShuffle(labelBuckets.A, `${seedPrefix}_${prefix}_A`).slice(0, requiredPerLabel);
+      const queueB = deterministicShuffle(labelBuckets.B, `${seedPrefix}_${prefix}_B`).slice(0, requiredPerLabel);
+      let offsetA = 0;
+      let offsetB = 0;
       const blocks = [];
       for (let i = 0; i < blockCount; i++) {
-        const start = i * blockSize;
-        const chunk = shuffled.slice(start, start + blockSize).map(trial => ({
+        const chunkA = queueA.slice(offsetA, offsetA + halfBlock);
+        const chunkB = queueB.slice(offsetB, offsetB + halfBlock);
+        offsetA += halfBlock;
+        offsetB += halfBlock;
+        const merged = chunkA.concat(chunkB).map(trial => ({
           ...trial,
           blockName: `${prefix}-${i + 1}`,
           blockIndex: i + 1
         }));
         const ordered = prefix === 'II'
-          ? shuffleIIBlockTrialsWithAntiStreak(chunk, `${seedPrefix}_${prefix}_blk${i}`)
-          : shuffleBlockTrials(chunk, `${seedPrefix}_${prefix}_blk${i}`);
+          ? shuffleIIBlockTrialsWithAntiStreak(merged, `${seedPrefix}_${prefix}_blk${i}`)
+          : shuffleBlockTrials(merged, `${seedPrefix}_${prefix}_blk${i}`);
         ordered.forEach((trial, idx) => {
           trial.correctKey = trial.label === 'A' ? 'a' : 'b';
           trial.binKey = determineBinKey(trial.ori);
