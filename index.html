@@ -185,11 +185,10 @@
     const RESP_LIMIT_MS = 3000;
     const FEEDBACK_MS   = 500;
 
-    // 固定物理范围：所有被试共用 sf=3~10、ori=±80°，便于匹配 Maddox/Roark 图示的 II 高斯结构
-    // 参照 Roark 等人图示的 II 分布，将 sf 扩展至 3~10 左右、ori 扩展至 ±80°，以便得到清晰的对角线高斯团块
-    const FIXED_SF_RANGE = { min: 3, max: 10 };
-    const FIXED_ORI_RANGE = { min: -80, max: 80 };
-    const FIXED_SF_LEVELS = [3, 4, 5, 6, 7, 8, 9, 10];
+    // 固定物理范围：所有被试共用 sf=3~6、ori=±30°，便于按指令精确控制 sf×ori 的配对关系
+    const FIXED_SF_RANGE = { min: 3, max: 6 };
+    const FIXED_ORI_RANGE = { min: -30, max: 30 };
+    const FIXED_SF_LEVELS = [3, 4, 5, 6];
 
     let activeSfRange = { ...FIXED_SF_RANGE };
     let activeOriRange = { ...FIXED_ORI_RANGE };
@@ -287,6 +286,36 @@
     const II_BIN_KEYS = ['b1', 'b2', 'b3'];
     const II_LABELS = ['A', 'B'];
 
+    // Session 1 的 II 配对：按照指令为每个 sf 分配特定的 ori 区间
+    const II_WINDOWS_SESSION1 = {
+      3: { A: [[-10, 0]], B: [[-30, -20]] },
+      4: { A: [[0, 10]], B: [[-20, -10]] },
+      5: { A: [[10, 20]], B: [[-10, 0]] },
+      6: { A: [[20, 30]], B: [[0, 10]] }
+    };
+
+    function flipRange(range) {
+      return [-range[1], -range[0]];
+    }
+
+    function buildSession2Windows(base) {
+      const result = {};
+      Object.keys(base).forEach(sfKey => {
+        const sf = Number(sfKey);
+        const source = base[sf];
+        result[sf] = {
+          A: source.B.map(flipRange),
+          B: source.A.map(flipRange)
+        };
+      });
+      return result;
+    }
+
+    const II_WINDOWS = {
+      1: II_WINDOWS_SESSION1,
+      2: buildSession2Windows(II_WINDOWS_SESSION1)
+    };
+
     const CSV_HEADER = [
       'participant','group','orderCode','serial','sessionIndex','movement','task','iiStructure','orderInSession',
       'blockName','blockIndex','trialIndex','sf','ori','nearFlag','label','correctKey','resp','corr','rt','delayMs','trialStartUTC','qc_near_ratio','qc_counts_json'
@@ -316,38 +345,7 @@
       }
     };
     // II：两个 Session 使用对称的倾斜均值与相关协方差，确保 sf 维度权重大于 ori，且 ori 必须与 sf 联合判断。
-    const II_GAUSS_PARAMS = {
-      1: {
-        structureKey: 'II1',
-        // 低 sf × 高 |ori| vs 高 sf × 低 |ori|，形成与图示类似的正斜率高斯团块
-        classes: {
-          A: { mean: [-1.1, 1.1], cov: [[0.55, 0.32], [0.32, 0.65]] },
-          B: { mean: [1.1, 0.0], cov: [[0.55, 0.32], [0.32, 0.65]] }
-        }
-      },
-      2: {
-        structureKey: 'II2',
-        // 镜像结构：低 sf × 低 |ori| vs 高 sf × 高 |ori|，但通过负相关协方差形成另一条斜线
-        classes: {
-          A: { mean: [-1.1, -0.1], cov: [[0.55, -0.32], [-0.32, 0.65]] },
-          B: { mean: [1.1, -1.1], cov: [[0.55, -0.32], [-0.32, 0.65]] }
-        }
-      }
-    };
-    // 初始化后将打印线性判别式，示例：score = w_sf * x + w_ori * y + c，其中 |w_sf| > |w_ori|，II2 的 y 项符号相反以形成镜像结构。
-
-    function initializeGaussianBoundaries() {
-      Object.values(II_GAUSS_PARAMS).forEach(cfg => {
-        const boundary = computeBayesBoundaryFromGaussians(cfg.classes.A, cfg.classes.B);
-        cfg.boundary = boundary;
-        if (cfg.structureKey && II_STRUCTURES_LIBRARY[cfg.structureKey]) {
-          II_STRUCTURES_LIBRARY[cfg.structureKey].boundary = boundary;
-        }
-        console.log(`Bayes boundary ${cfg.structureKey || ''}: score = ${boundary.w1.toFixed(2)}*x + ${boundary.w2.toFixed(2)}*y + ${boundary.c.toFixed(2)}`);
-      });
-    }
-
-    initializeGaussianBoundaries();
+    // II 采用指令式 sf×ori 窗口，不再依赖潜在空间高斯，因此不需要额外的贝叶斯边界初始化。
 
     // -------------------------
     // DOM references
@@ -816,9 +814,9 @@
       return null;
     }
 
-    const ORI_MAG_MIN = 5;
+    const ORI_MAG_MIN = 3;
 
-    // x in normal space → 线性映射到 [3,10] → 量化为 {3,4,5,6,7,8,9,10}
+    // x in normal space → 线性映射到 [3,6] → 量化为 {3,4,5,6}
     function mapLatentToPhysicalSf(latentX) {
       return clamp(
         linearMap(latentX, LATENT_RANGE.xMin, LATENT_RANGE.xMax, activeSfRange.min, activeSfRange.max),
@@ -827,7 +825,7 @@
       );
     }
 
-    // y in normal space → |ori| ∈ [5°, 80°]，方向符号稍后随机决定
+    // y in normal space → |ori| ∈ [3°, 30°]，方向符号稍后随机决定
     function mapLatentToPhysicalOriMagnitude(latentY) {
       const absLatent = Math.abs(latentY);
       return clamp(
@@ -942,181 +940,89 @@
       return counts;
     }
 
-    function fillRBPhase(config, ruleKey, catType, phase, totalCount, rng, seenKeys) {
-      const perLabel = totalCount / 2;
-      const counts = { A: 0, B: 0 };
+    function sampleOrientationFromRange(range, rng) {
+      const min = Math.min(range[0], range[1]);
+      const max = Math.max(range[0], range[1]);
+      const value = min + rng() * (max - min);
+      return Number(value.toFixed(3));
+    }
+
+    function buildRBPhase(sessionIndex, catType, phase, totalCount, rng) {
       const trials = [];
-      const guardLimit = totalCount * 800;
-      let guard = 0;
-      while ((counts.A < perLabel || counts.B < perLabel) && guard < guardLimit) {
-        guard += 1;
-        const desiredLabel = counts.A < perLabel ? 'A' : 'B';
-        const classCfg = config.classes[desiredLabel];
-        if (!classCfg) break;
-        const sample = sampleStimulusFromGaussian(classCfg, rng);
-        if (!sample) continue;
-        const actualLabel = labelRB(sample.sf, sample.ori, ruleKey);
-        if (counts[actualLabel] >= perLabel) continue;
-        const key = `${sample.sf}_${sample.ori.toFixed(3)}`;
-        if (phase === 'gen' && seenKeys && seenKeys.has(key)) continue;
-        const trial = buildTrialFromStimulus(
-          { sf: sample.sf, ori: sample.ori, label: actualLabel },
+      const perLabel = Math.floor(totalCount / 2);
+      const absMax = Math.abs(activeOriRange.max);
+      const nearRange = [ORI_MAG_MIN, Math.max(ORI_MAG_MIN + 0.5, rbOriThresholdDeg - 0.2)];
+      const farRange = [rbOriThresholdDeg, absMax];
+      const labelOrder = sessionIndex === 1 ? { A: 'near', B: 'far' } : { A: 'far', B: 'near' };
+      const sfLevels = getActiveSfLevels();
+      const pickSf = () => sfLevels[Math.floor(rng() * sfLevels.length)];
+      const sampleRBTrial = label => {
+        const magRange = labelOrder[label] === 'near' ? nearRange : farRange;
+        const mag = sampleOrientationFromRange(magRange, rng);
+        const sign = rng() < 0.5 ? -1 : 1;
+        const ori = Number((sign * mag).toFixed(3));
+        return buildTrialFromStimulus(
+          { sf: pickSf(), ori, label },
           { catType, phase, nearFlag: 0 }
         );
-        trials.push(trial);
-        counts[actualLabel] += 1;
-        if (seenKeys) seenKeys.add(key);
-      }
-      if (counts.A < perLabel || counts.B < perLabel) {
-        console.warn('RB 阶段样本不足，复制补齐', { catType, phase, counts });
-        const templateA = trials.filter(t => t.label === 'A');
-        const templateB = trials.filter(t => t.label === 'B');
-        while (counts.A < perLabel && templateA.length) {
-          trials.push({ ...templateA[counts.A % templateA.length], phase });
-          counts.A += 1;
-        }
-        while (counts.B < perLabel && templateB.length) {
-          trials.push({ ...templateB[counts.B % templateB.length], phase });
-          counts.B += 1;
-        }
-      }
-      return deterministicShuffle(trials, `${catType}_${phase}_shuffle`);
-    }
-
-    function generateRBStimulusSet(sessionIndex, catType, ruleKey, seed) {
-      const config = RB_GAUSS_PARAMS[sessionIndex];
-      if (!config) return { train: [], gen: [] };
-      const rngTrain = hashString(`${catType}_${seed}_train`);
-      const seenKeys = new Set();
-      const train = fillRBPhase(config, ruleKey, catType, 'train', N_RB, rngTrain, seenKeys);
-      const rngGen = hashString(`${catType}_${seed}_gen`);
-      const gen = fillRBPhase(config, ruleKey, catType, 'gen', RB_GEN_COUNT, rngGen, seenKeys);
-      return { train, gen };
-    }
-
-    function fillIIPhase(config, catType, structureKey, phase, totalCount, rng) {
-      const sfLevels = getActiveSfLevels();
-      const perSfTotals = distributeCounts(totalCount, sfLevels.length);
-      const perLabel = totalCount / 2;
-      const perSfLabelTargets = {};
-      const baseHalfSum = sfLevels.reduce((sum, sf, idx) => sum + Math.floor(perSfTotals[idx] / 2), 0);
-      let aAdjust = perLabel - baseHalfSum;
-      sfLevels.forEach((sf, idx) => {
-        const totalForSf = perSfTotals[idx];
-        let targetA = Math.floor(totalForSf / 2);
-        let targetB = totalForSf - targetA;
-        if (totalForSf % 2 !== 0 && aAdjust !== 0) {
-          if (aAdjust > 0) {
-            targetA += 1;
-            targetB -= 1;
-            aAdjust -= 1;
-          } else if (aAdjust < 0) {
-            targetA -= 1;
-            targetB += 1;
-            aAdjust += 1;
-          }
-        }
-        perSfLabelTargets[sf] = { A: targetA, B: targetB };
-      });
-      if (aAdjust !== 0) {
-        // 若仍有余数，继续在可调的 sf bucket 上分配
-        const adjustLabel = aAdjust > 0 ? 'A' : 'B';
-        sfLevels.forEach(sf => {
-          if (aAdjust === 0) return;
-          const bucket = perSfLabelTargets[sf];
-          if (adjustLabel === 'A' && bucket.B > 0) {
-            bucket.A += 1;
-            bucket.B -= 1;
-            aAdjust -= 1;
-          } else if (adjustLabel === 'B' && bucket.A > 0) {
-            bucket.A -= 1;
-            bucket.B += 1;
-            aAdjust += 1;
-          }
-        });
-      }
-
-      const labelTotals = { A: 0, B: 0 };
-      const sfLabelCounts = {};
-      const trials = [];
-      const guardLimit = totalCount * 8000;
-      let guard = 0;
-      while (trials.length < totalCount && guard < guardLimit) {
-        guard += 1;
-        const desiredLabel = labelTotals.A <= labelTotals.B ? 'A' : 'B';
-        const classCfg = config.classes[desiredLabel];
-        if (!classCfg) break;
-        const sample = sampleStimulusFromGaussian(classCfg, rng);
-        if (!sample) continue;
-        const decision = bayesDecision(sample.latentX, Math.abs(sample.latentY), config.boundary);
-        if (labelTotals[decision] >= perLabel) continue;
-        const sfTargets = perSfLabelTargets[sample.sf];
-        if (!sfTargets) continue;
-        const perSf = sfLabelCounts[sample.sf] || { A: 0, B: 0 };
-        if (perSf[decision] >= sfTargets[decision]) continue;
-        const distInfo = computeIIDistance(sample.latentX, sample.latentY, config.boundary);
-        const trial = buildTrialFromStimulus(
-          { sf: sample.sf, ori: sample.ori, label: decision },
-          {
-            catType,
-            phase,
-            iiStructure: config.structureKey,
-            nearFlag: distInfo.distance <= 0.5 ? 1 : 0,
-            symbolicFlag: 0
-          }
-        );
-        trials.push(trial);
-        perSf[decision] += 1;
-        sfLabelCounts[sample.sf] = perSf;
-        labelTotals[decision] += 1;
-      }
-
-      const bucketPools = {};
-      trials.forEach(trial => {
-        const key = `${trial.sf}_${trial.label}`;
-        if (!bucketPools[key]) bucketPools[key] = [];
-        bucketPools[key].push(trial);
-      });
-      sfLevels.forEach(sf => {
-        const targets = perSfLabelTargets[sf];
-        const counts = sfLabelCounts[sf] || { A: 0, B: 0 };
-        II_LABELS.forEach(label => {
-          const desired = targets[label];
-          const pool = bucketPools[`${sf}_${label}`];
-          while (counts[label] < desired && pool && pool.length) {
-            const template = pool[counts[label] % pool.length];
-            const clone = { ...template };
-            clone.phase = phase;
-            trials.push(clone);
-            counts[label] += 1;
-            labelTotals[label] += 1;
-          }
-        });
-        sfLabelCounts[sf] = counts;
-      });
-
-      if (trials.length < totalCount) {
-        console.warn('II 阶段样本不足，复制补齐', { catType, phase, totals: labelTotals });
+      };
+      for (let i = 0; i < perLabel; i++) {
+        trials.push(sampleRBTrial('A'));
+        trials.push(sampleRBTrial('B'));
       }
       ensureTrialCount(trials, totalCount);
       return deterministicShuffle(trials, `${catType}_${phase}_shuffle`);
     }
 
+    function generateRBStimulusSet(sessionIndex, catType, ruleKey, seed) {
+      const rngTrain = hashString(`${catType}_${seed}_train`);
+      const train = buildRBPhase(sessionIndex, catType, 'train', N_RB, rngTrain);
+      const rngGen = hashString(`${catType}_${seed}_gen`);
+      const gen = buildRBPhase(sessionIndex, catType, 'gen', RB_GEN_COUNT, rngGen);
+      return { train, gen };
+    }
+
+
+    function buildStructuredIIPhase(sessionIndex, catType, phase, totalCount, rng) {
+      const windows = II_WINDOWS[sessionIndex];
+      if (!windows) return [];
+      const sfLevels = Object.keys(windows).map(Number).sort((a, b) => a - b);
+      const perSfTotals = distributeCounts(totalCount, sfLevels.length);
+      const trials = [];
+      sfLevels.forEach((sf, idx) => {
+        const totalForSf = perSfTotals[idx];
+        let targetA = Math.floor(totalForSf / 2);
+        let targetB = totalForSf - targetA;
+        const emit = (label, target) => {
+          const intervals = windows[sf][label];
+          for (let i = 0; i < target; i++) {
+            const range = intervals[i % intervals.length];
+            const ori = sampleOrientationFromRange(range, rng);
+            const trial = buildTrialFromStimulus(
+              { sf, ori, label },
+              { catType, phase, iiStructure: catType, nearFlag: 0 }
+            );
+            trials.push(trial);
+          }
+        };
+        emit('A', targetA);
+        emit('B', targetB);
+      });
+      return deterministicShuffle(trials, `${catType}_${phase}_structured`);
+    }
+
     function generateIIStimulusSet(sessionIndex, catType, seed) {
-      const config = II_GAUSS_PARAMS[sessionIndex];
-      if (!config) return { train: [], gen: [], heuristics: null };
       let bestCandidate = null;
       let bestHeuristic = Infinity;
       let bestDetails = null;
       for (let attempt = 0; attempt < II_MAX_PLAN_ATTEMPTS; attempt++) {
-        const trainSeed = hashString(`${catType}_${seed}_train_${attempt}`);
-        const train = fillIIPhase(config, catType, config.structureKey, 'train', N_II, trainSeed);
+        const rngTrain = hashString(`${catType}_${seed}_train_${attempt}`);
+        const train = buildStructuredIIPhase(sessionIndex, catType, 'train', N_II, rngTrain);
         const heuristics = evaluateSingleDimHeuristics(train);
         const singleAcc = Math.max(heuristics.sfAccuracy, heuristics.oriAccuracy);
-        heuristics.singleAccuracy = singleAcc;
         if (singleAcc <= II_SINGLE_DIM_MAX_ACCURACY) {
-          const genSeed = hashString(`${catType}_${seed}_gen_${attempt}`);
-          const gen = fillIIPhase(config, catType, config.structureKey, 'gen', II_GEN_COUNT, genSeed);
+          const rngGen = hashString(`${catType}_${seed}_gen_${attempt}`);
+          const gen = buildStructuredIIPhase(sessionIndex, catType, 'gen', II_GEN_COUNT, rngGen);
           return { train, gen, heuristics };
         }
         if (singleAcc < bestHeuristic) {
@@ -1129,7 +1035,7 @@
         `II ${catType}: 未在 ${II_MAX_PLAN_ATTEMPTS} 次内满足单维≤${II_SINGLE_DIM_MAX_ACCURACY}，使用最佳候选`,
         bestDetails
       );
-      const fallbackGen = fillIIPhase(config, catType, config.structureKey, 'gen', II_GEN_COUNT, hashString(`${catType}_${seed}_gen_fallback`));
+      const fallbackGen = buildStructuredIIPhase(sessionIndex, catType, 'gen', II_GEN_COUNT, hashString(`${catType}_${seed}_gen_fallback`));
       return { train: bestCandidate || [], gen: fallbackGen, heuristics: bestDetails };
     }
 
