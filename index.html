@@ -6,25 +6,90 @@
   <style>
     :root { color-scheme: light dark; }
     * { box-sizing: border-box; font-family: Arial, sans-serif; }
-    body, html { margin: 0; height: 100%; background: #888; color: #111; }
-    #startScreen, #experimentContainer { position: fixed; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 16px; }
+    body, html { margin: 0; height: 100%; background: #808080; color: #111; }
+    body.hide-cursor { cursor: none; }
+    #startScreen, #experimentContainer {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      gap: 16px;
+    }
+    #startScreen {
+      z-index: 50;
+      background: #808080;
+    }
     #experimentContainer { display: none; }
-    #participantInput, #sessionInput { padding: 10px 14px; font-size: 18px; border-radius: 6px; border: 1px solid #333; min-width: 260px; }
-    #startButton { padding: 12px 24px; font-size: 18px; border-radius: 6px; border: none; background: #2c7be5; color: #fff; cursor: pointer; }
+    #participantInput, #sessionInput {
+      padding: 10px 14px;
+      font-size: 18px;
+      border-radius: 6px;
+      border: 1px solid #333;
+      min-width: 260px;
+    }
+    #startButton {
+      padding: 12px 24px;
+      font-size: 18px;
+      border-radius: 6px;
+      border: none;
+      background: #2c7be5;
+      color: #fff;
+      cursor: pointer;
+    }
     #startButton:disabled { background: #777; cursor: not-allowed; }
     #canvasWrapper { position: relative; width: 100vw; height: 100vh; }
-    canvas { width: 100%; height: 100%; display: block; background: #888; }
-    #feedbackOverlay { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 48px; font-weight: bold; text-shadow: 0 0 10px rgba(0,0,0,0.5); pointer-events: none; opacity: 0; transition: opacity 0.1s ease; }
-    #responseButtons { position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%); display: flex; gap: 16px; z-index: 10; }
-    #responseButtons button { padding: 14px 24px; font-size: 18px; border-radius: 999px; border: none; background: rgba(0,0,0,0.6); color: #fff; min-width: 140px; cursor: pointer; transition: background 0.2s ease; }
-    #responseButtons button:active { background: rgba(0,0,0,0.8); }
-    #exitButton, #downloadButton { position: fixed; top: 20px; padding: 10px 18px; font-size: 16px; border: none; border-radius: 999px; color: #fff; cursor: pointer; z-index: 12; display: none; }
-    #exitButton { left: 20px; background: rgba(220, 53, 69, 0.9); }
-    #downloadButton { right: 20px; background: rgba(40, 167, 69, 0.9); }
-    #waitOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.65); color: #fff; display: none; align-items: center; justify-content: center; text-align: center; padding: 20px; z-index: 20; }
+    canvas { width: 100%; height: 100%; display: block; background: #808080; }
+    #feedbackOverlay {
+      position: absolute;
+      left: 50%; top: 50%; transform: translate(-50%,-50%);
+      font-size: 48px; font-weight: bold;
+      text-shadow: 0 0 10px rgba(0,0,0,0.5);
+      pointer-events: none; opacity: 0; transition: opacity 0.1s ease;
+    }
+    #responseButtons {
+      position: fixed;
+      bottom: 32px;
+      left: 50%; transform: translateX(-50%);
+      display: flex; gap: 16px; z-index: 10;
+    }
+    #responseButtons button {
+      padding: 14px 26px;
+      font-size: 18px;
+      border-radius: 999px;
+      border: none;
+      background: rgba(0,0,0,0.65);
+      color: #fff;
+      min-width: 150px;
+      cursor: pointer;
+      transition: background 0.2s ease;
+    }
+    #responseButtons button:active { background: rgba(0,0,0,0.85); }
+    #exitButton, #downloadButton {
+      position: fixed; top: 20px;
+      padding: 10px 18px; font-size: 16px;
+      border: none; border-radius: 999px; color: #fff;
+      cursor: pointer; z-index: 12; display: none;
+    }
+    #exitButton { left: 20px; background: rgba(220,53,69,0.9); }
+    #downloadButton { right: 20px; background: rgba(40,167,69,0.9); }
+    #waitOverlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+      color: #fff; display: none; align-items: center; justify-content: center;
+      text-align: center; padding: 20px; z-index: 20;
+    }
     #waitOverlay.visible { display: flex; }
-    #waitOverlay .wait-box { background: rgba(0,0,0,0.55); padding: 28px 36px; border-radius: 16px; max-width: 560px; line-height: 1.5; font-size: 20px; }
-    #waitOverlay button { margin-top: 18px; padding: 12px 32px; border: none; border-radius: 999px; font-size: 18px; background: #2c7be5; color: #fff; cursor: pointer; }
+    #waitOverlay .wait-box {
+      background: rgba(0,0,0,0.55);
+      padding: 28px 36px; border-radius: 16px;
+      max-width: 560px; line-height: 1.5; font-size: 20px;
+    }
+    #waitOverlay button {
+      margin-top: 18px; padding: 12px 32px;
+      border: none; border-radius: 999px;
+      font-size: 18px; background: #2c7be5; color: #fff; cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -34,7 +99,9 @@
     <label for="sessionInput">Session (1 或 2)</label>
     <input id="sessionInput" type="number" min="1" max="2" />
     <button id="startButton">开始</button>
-    <p style="max-width: 460px; text-align: center; line-height: 1.4; font-size: 14px; color: #222;">点击“开始”进入 II 规则的 Gabor 分类实验。作答可按键 A/B，或点击屏幕下方的按钮。随时按下 Escape 可终止并下载数据。</p>
+    <p style="max-width: 480px; text-align: center; line-height: 1.4; font-size: 14px; color: #222;">
+      点击“开始”进入 II 规则的 Gabor 分类实验。作答可按键 A/B，或点击屏幕下方的胶囊按钮。随时按下 Escape 可终止并下载数据。
+    </p>
   </div>
   <div id="experimentContainer">
     <div id="canvasWrapper">
@@ -56,7 +123,7 @@
   </div>
   <script>
     // -------------------------
-    // Configurable constants
+    // Configurable constants (II-only)
     // -------------------------
     const TRAIN_BLOCK_COUNT = 8;
     const TRIALS_PER_BLOCK = 50;
@@ -68,12 +135,14 @@
     const FEEDBACK_MS = 500;
     const DELAYED_MS = 2000; // group B only during training
     const SEED_BASE = 123456789;
-    const GAUSS_DISTANCE = 9; // between class means along optimal axis
-    const GAUSS_VAR_OPT = 30;
-    const GAUSS_VAR_ORTH = 300;
+    const GAUSS_DISTANCE = 12; // separation along optimal axis in latent space
+    const GAUSS_VAR_OPT = 15;
+    const GAUSS_VAR_ORTH = 400;
     const OPTIMAL_RANGE = 100; // latent x,y nominal span mapped to [0,100]
     const SF_MIN = 2.0, SF_MAX = 8.0;
     const ORI_MIN = -60, ORI_MAX = 60;
+    const SINGLE_DIM_MAX = 0.6; // sf-only or |ori|-only ceiling
+
     // -------------------------
     // DOM references
     // -------------------------
@@ -118,47 +187,26 @@
     // -------------------------
     // Stimulus generation helpers
     // -------------------------
-    // Map a latent value assumed around 50±spread onto the physical range.
     function mapToRange(value, min, max) {
       const norm = Math.min(1, Math.max(0, value / OPTIMAL_RANGE));
       return min + (max - min) * norm;
     }
 
-    function quantizeSf(sf) {
-      return Math.min(SF_MAX, Math.max(SF_MIN, Math.round(sf * 10) / 10));
-    }
-
-    function sampleStimulus(rng, meanVec, covL) {
-      const [z0, z1] = gaussianPair(rng);
-      const x = meanVec[0] + covL[0] * z0 + covL[1] * z1;
-      const y = meanVec[1] + covL[3] * z0 + covL[4] * z1;
-      const sf = quantizeSf(mapToRange(x, SF_MIN, SF_MAX));
-      const magOri = mapToRange(Math.abs(y), 0, Math.abs(ORI_MAX));
-      const sign = rng() < 0.5 ? -1 : 1;
-      const ori = sign * magOri;
-      const s = sf - 4.5;
-      const o = Math.abs(ori) - 10;
-      const d = s * o;
-      return { sf, ori, d };
-    }
-
     function buildCovL(angleRad) {
       const cosA = Math.cos(angleRad);
       const sinA = Math.sin(angleRad);
-      // Rotate diag variances and return Cholesky-like lower for sampling
-      const vOpt = GAUSS_VAR_OPT;
-      const vOrth = GAUSS_VAR_ORTH;
-      const a11 = cosA * Math.sqrt(vOpt);
-      const a12 = -sinA * Math.sqrt(vOrth);
-      const a21 = sinA * Math.sqrt(vOpt);
-      const a22 = cosA * Math.sqrt(vOrth);
+      // Rotate diagonal sqrt variances
+      const a11 = cosA * Math.sqrt(GAUSS_VAR_OPT);
+      const a12 = -sinA * Math.sqrt(GAUSS_VAR_ORTH);
+      const a21 = sinA * Math.sqrt(GAUSS_VAR_OPT);
+      const a22 = cosA * Math.sqrt(GAUSS_VAR_ORTH);
       return [a11, a12, 0, a21, a22];
     }
 
     function buildMeans(angleRad) {
       const dx = (GAUSS_DISTANCE / 2) * Math.cos(angleRad);
       const dy = (GAUSS_DISTANCE / 2) * Math.sin(angleRad);
-      const cx = OPTIMAL_RANGE / 2; // center the Gaussians around 50 in latent space
+      const cx = OPTIMAL_RANGE / 2;
       const cy = OPTIMAL_RANGE / 2;
       return {
         A: [cx + dx, cy + dy],
@@ -166,96 +214,125 @@
       };
     }
 
-    function labelII(stim, invert) {
-      const base = stim.d >= 0 ? 'A' : 'B';
-      if (!invert) return base;
-      return base === 'A' ? 'B' : 'A';
+    function buildLinearRule(angleRad) {
+      const means = buildMeans(angleRad);
+      const covL = buildCovL(angleRad);
+      // Recover Sigma = L * L^T
+      const sigma_xx = covL[0] * covL[0] + covL[1] * covL[1];
+      const sigma_xy = covL[0] * covL[3] + covL[1] * covL[4];
+      const sigma_yy = covL[3] * covL[3] + covL[4] * covL[4];
+      const det = sigma_xx * sigma_yy - sigma_xy * sigma_xy;
+      const inv_xx = sigma_yy / det;
+      const inv_xy = -sigma_xy / det;
+      const inv_yy = sigma_xx / det;
+      const diff = [means.A[0] - means.B[0], means.A[1] - means.B[1]];
+      const w0 = inv_xx * diff[0] + inv_xy * diff[1];
+      const w1 = inv_xy * diff[0] + inv_yy * diff[1];
+      const mid = [(means.A[0] + means.B[0]) / 2, (means.A[1] + means.B[1]) / 2];
+      const b = -(w0 * mid[0] + w1 * mid[1]);
+      return { means, covL, w: [w0, w1], b };
     }
 
-    function generateIISet(sessionIndex, phase) {
-      const angle = sessionIndex === 2 ? -Math.PI / 4 : Math.PI / 4;
-      const means = buildMeans(angle);
-      const covL = buildCovL(angle);
-      const rng = makeLCG(SEED_BASE + sessionIndex + (phase === 'gen' ? 999 : 0));
-      const invert = sessionIndex === 2; // II2 mirrors II1 via label flip
-      const total = phase === 'train' ? TRAIN_TOTAL : GEN_TOTAL;
-      const perClass = total / 2;
-      const stim = [];
-      while (stim.length < total) {
-        const target = stim.length < perClass ? 'A' : 'B';
-        const mean = target === 'A' ? means.A : means.B;
-        const sample = sampleStimulus(rng, [mean[0], mean[1]], covL);
-        const lbl = labelII(sample, invert);
-        if (lbl !== target) continue; // keep classes balanced by sampling until label matches target
-        stim.push({ sf: sample.sf, ori: sample.ori, label: lbl, catType: sessionIndex === 1 ? 'II1' : 'II2', phase });
-      }
-      return stim;
+    function sampleStimulus(rng, meanVec, covL) {
+      const [z0, z1] = gaussianPair(rng);
+      const xLatent = meanVec[0] + covL[0] * z0 + covL[1] * z1;
+      const yLatent = meanVec[1] + covL[3] * z0 + covL[4] * z1;
+      const sf = mapToRange(xLatent, SF_MIN, SF_MAX);
+      const magOri = mapToRange(Math.abs(yLatent), 0, Math.abs(ORI_MAX));
+      const sign = rng() < 0.5 ? -1 : 1;
+      const ori = sign * magOri;
+      return { sf, ori, x: xLatent, y: Math.abs(yLatent) };
     }
 
-    function chunkBlocks(stimuli, blockSize) {
-      const blocks = [];
-      const copy = [...stimuli];
-      // enforce per-block balance
-      const aQueue = copy.filter(s => s.label === 'A');
-      const bQueue = copy.filter(s => s.label === 'B');
-      for (let i = 0; i < copy.length / blockSize; i++) {
-        const block = [];
-        for (let j = 0; j < blockSize / 2; j++) block.push(aQueue.shift());
-        for (let j = 0; j < blockSize / 2; j++) block.push(bQueue.shift());
-        for (let k = block.length - 1; k > 0; k--) {
-          const idx = Math.floor(Math.random() * (k + 1));
-          [block[k], block[idx]] = [block[idx], block[k]];
-        }
-        blocks.push(block);
-      }
-      return blocks;
+    function labelII(stim, rule) {
+      const score = rule.w[0] * stim.x + rule.w[1] * stim.y + rule.b;
+      return score >= 0 ? 'A' : 'B';
+    }
+
+    function best1DAcc(values, labels) {
+      const pairs = values.map((v, i) => ({ v, label: labels[i] })).sort((a, b) => a.v - b.v);
+      const unique = [...new Set(pairs.map(p => p.v))];
+      if (unique.length <= 1) return 1;
+      const thresholds = [];
+      for (let i = 0; i < unique.length - 1; i++) thresholds.push((unique[i] + unique[i + 1]) / 2);
+      let best = 0;
+      thresholds.forEach(t => {
+        let corr1 = 0, corr2 = 0;
+        pairs.forEach(p => {
+          const ruleA = p.v <= t ? 'A' : 'B';
+          const ruleB = p.v <= t ? 'B' : 'A';
+          if (ruleA === p.label) corr1++;
+          if (ruleB === p.label) corr2++;
+        });
+        best = Math.max(best, corr1 / pairs.length, corr2 / pairs.length);
+      });
+      return best;
     }
 
     function qcSingleDim(stimuli) {
       const labels = stimuli.map(s => s.label);
       const sfVals = stimuli.map(s => s.sf);
       const oriVals = stimuli.map(s => Math.abs(s.ori));
-      function best1DAcc(values) {
-        const pairs = values.map((v, i) => ({ v, label: labels[i] })).sort((a, b) => a.v - b.v);
-        const unique = [...new Set(pairs.map(p => p.v))];
-        if (unique.length <= 1) return 1;
-        const thresholds = [];
-        for (let i = 0; i < unique.length - 1; i++) thresholds.push((unique[i] + unique[i + 1]) / 2);
-        let best = 0;
-        thresholds.forEach(t => {
-          let corr1 = 0, corr2 = 0;
-          pairs.forEach(p => {
-            const ruleA = p.v <= t ? 'A' : 'B';
-            const ruleB = p.v <= t ? 'B' : 'A';
-            if (ruleA === p.label) corr1++;
-            if (ruleB === p.label) corr2++;
-          });
-          best = Math.max(best, corr1 / pairs.length, corr2 / pairs.length);
-        });
-        return best;
-      }
-      return { maxSfAcc: best1DAcc(sfVals), maxOriAcc: best1DAcc(oriVals) };
+      return { maxSfAcc: best1DAcc(sfVals, labels), maxOriAcc: best1DAcc(oriVals, labels) };
     }
 
-    function buildStimuli(sessionIndex) {
-      const train = generateIISet(sessionIndex, 'train');
-      let qc = qcSingleDim(train);
-      let tries = 0;
-      let best = train;
-      let bestScore = Math.max(qc.maxSfAcc, qc.maxOriAcc);
-      while ((qc.maxSfAcc > 0.6 || qc.maxOriAcc > 0.6) && tries < 500) {
-        tries++;
-        const candidate = generateIISet(sessionIndex, 'train');
-        const cqc = qcSingleDim(candidate);
-        const score = Math.max(cqc.maxSfAcc, cqc.maxOriAcc);
-        if (score < bestScore) { bestScore = score; best = candidate; qc = cqc; }
-        if (score <= 0.6) { best = candidate; qc = cqc; break; }
+    function shuffleWithRng(arr, rng) {
+      for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
       }
-      if (qc.maxSfAcc > 0.6 || qc.maxOriAcc > 0.6) {
-        console.warn('II single-dimension QC not fully met, using best candidate', qc);
+    }
+
+    function generateIISet(sessionIdx, phase) {
+      const angle = sessionIdx === 2 ? -Math.PI / 4 : Math.PI / 4;
+      const rule = buildLinearRule(angle);
+      const baseSeed = SEED_BASE + sessionIdx * 1000 + (phase === 'gen' ? 500 : 0);
+      const rng = makeLCG(baseSeed);
+      const total = phase === 'gen' ? GEN_TOTAL : TRAIN_TOTAL;
+      const perClass = total / 2;
+      let bestCandidate = null;
+      let bestScore = 1;
+      const maxTries = phase === 'gen' ? 1 : 500;
+      for (let attempt = 0; attempt < maxTries; attempt++) {
+        const stim = [];
+        let aCount = 0, bCount = 0;
+        // draw until balance met
+        while (stim.length < total) {
+          const target = aCount < perClass ? 'A' : 'B';
+          const mean = target === 'A' ? rule.means.A : rule.means.B;
+          const sample = sampleStimulus(rng, mean, rule.covL);
+          const lbl = labelII(sample, rule);
+          if (lbl !== target) continue;
+          stim.push({ sf: sample.sf, ori: sample.ori, label: lbl, catType: sessionIdx === 1 ? 'II1' : 'II2', phase });
+          if (lbl === 'A') aCount++; else bCount++;
+        }
+        if (phase === 'gen') return stim;
+        const qc = qcSingleDim(stim);
+        const score = Math.max(qc.maxSfAcc, qc.maxOriAcc);
+        if (score < bestScore) { bestScore = score; bestCandidate = stim; }
+        if (qc.maxSfAcc <= SINGLE_DIM_MAX && qc.maxOriAcc <= SINGLE_DIM_MAX) {
+          console.log(`II QC passed at attempt ${attempt} with sf=${qc.maxSfAcc.toFixed(3)}, ori=${qc.maxOriAcc.toFixed(3)}`);
+          return stim;
+        }
       }
-      const gen = generateIISet(sessionIndex, 'gen');
-      return { train: best, gen };
+      console.warn('II QC not fully met, using best candidate', bestScore.toFixed(3));
+      return bestCandidate;
+    }
+
+    function chunkBlocks(stimuli, blockSize, rng) {
+      const blocks = [];
+      const aQueue = stimuli.filter(s => s.label === 'A');
+      const bQueue = stimuli.filter(s => s.label === 'B');
+      shuffleWithRng(aQueue, rng); shuffleWithRng(bQueue, rng);
+      const blockCount = Math.floor(stimuli.length / blockSize);
+      for (let i = 0; i < blockCount; i++) {
+        const block = [];
+        for (let j = 0; j < blockSize / 2; j++) block.push(aQueue.shift());
+        for (let j = 0; j < blockSize / 2; j++) block.push(bQueue.shift());
+        shuffleWithRng(block, rng);
+        blocks.push(block.map((t, idx) => ({ ...t, index: idx + 1 + i * blockSize })));
+      }
+      return blocks;
     }
 
     // -------------------------
@@ -272,7 +349,7 @@
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     }
 
-    function drawBackground() { ctx.fillStyle = '#888'; ctx.fillRect(0, 0, displayWidth, displayHeight); }
+    function drawBackground() { ctx.fillStyle = '#808080'; ctx.fillRect(0, 0, displayWidth, displayHeight); }
 
     function drawFixation() {
       drawBackground();
@@ -287,7 +364,7 @@
       ctx.stroke();
     }
 
-    function drawGabor(ctx, cx, cy, diameterPx, oriDeg, sfPairs) {
+    function drawGabor(ctx, cx, cy, diameterPx, oriDeg, sfCycles) {
       const size = Math.max(8, Math.round(diameterPx));
       const off = document.createElement('canvas');
       off.width = size; off.height = size;
@@ -296,8 +373,8 @@
       const data = imageData.data;
       const radius = size / 2;
       const orientation = oriDeg * Math.PI / 180;
-      const cycles = sfPairs / 2; // visible black+white pairs
-      const freq = cycles / size;
+      // sfCycles 表示可见周期数；频率=周期/像素，保证 sf=4 时直径方向约 4 个黑白周期
+      const freq = sfCycles / size;
       const cosOri = Math.cos(orientation);
       const sinOri = Math.sin(orientation);
       const sigma = radius * 0.45;
@@ -479,18 +556,23 @@
     async function runExperiment() {
       experimentRunning = true;
       setExitVisibility(true);
+      document.body.classList.add('hide-cursor');
       resizeCanvas(); drawBlank();
       window.addEventListener('resize', resizeCanvas);
-      const trainingBlocks = chunkBlocks(currentStimuli.train, TRIALS_PER_BLOCK);
+      const rngBlocks = makeLCG(SEED_BASE + sessionIndex * 7000 + 42);
+      const trainingBlocks = chunkBlocks(currentStimuli.train, TRIALS_PER_BLOCK, rngBlocks);
       for (let b = 0; b < trainingBlocks.length; b++) {
-        await runBlock(trainingBlocks[b].map((t, idx) => ({ ...t, index: idx + 1 + b * TRIALS_PER_BLOCK })), `Train-${b+1}`, false);
+        await runBlock(trainingBlocks[b], `Train-${b+1}`, false);
         if (aborted) break;
-        if (b < trainingBlocks.length - 1) { await showWait('休息一下，按“继续”开始下一段训练。'); }
+        if (b < trainingBlocks.length - 1) { await showWait('休息一下，点击继续开始下一段训练。'); }
       }
       if (!aborted) {
         await showWait('即将进入无反馈测试阶段，5 秒后自动继续。', false, 5000);
-        const genTrials = currentStimuli.gen.map((t, idx) => ({ ...t, index: TRAIN_TOTAL + idx + 1 }));
-        await runBlock(genTrials, 'Generalization', true);
+        const rngGen = makeLCG(SEED_BASE + sessionIndex * 9000 + 99);
+        const genTrials = [...currentStimuli.gen];
+        shuffleWithRng(genTrials, rngGen);
+        const labeled = genTrials.map((t, idx) => ({ ...t, index: TRAIN_TOTAL + idx + 1 }));
+        await runBlock(labeled, 'Generalization', true);
       }
       conclude(false);
     }
@@ -500,6 +582,7 @@
     function conclude(forceAbort) {
       experimentRunning = false;
       setExitVisibility(false);
+      document.body.classList.remove('hide-cursor');
       clearResponseState();
       hideFeedback();
       waitOverlay.classList.remove('visible');
@@ -521,11 +604,11 @@
       const sessionVal = Number(sessionInput.value);
       if (!participantId || ![1,2].includes(sessionVal)) { alert('请输入被试编号并选择 Session 1 或 2。'); return; }
       sessionIndex = sessionVal;
-      movement = (participantId.startsWith('1')) ? 'Walking' : (participantId.startsWith('2') ? 'Seated' : 'Seated');
+      movement = participantId.startsWith('1') ? 'Walking' : (participantId.startsWith('2') ? 'Seated' : 'Seated');
       delayMs = participantId.toUpperCase().startsWith('B') ? DELAYED_MS : 0;
       resetState();
-      // Generate session-dependent mirrored stimuli
-      currentStimuli = buildStimuli(sessionIndex);
+      // Generate session-dependent mirrored stimuli after we know the session
+      currentStimuli = { train: generateIISet(sessionIndex, 'train'), gen: generateIISet(sessionIndex, 'gen') };
       startScreen.style.display = 'none';
       experimentContainer.style.display = 'flex';
       setDownloadVisibility(false);
