@@ -1,1 +1,537 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>Gabor 分类实验（II-only）</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; font-family: Arial, sans-serif; }
+    body, html { margin: 0; height: 100%; background: #888; color: #111; }
+    #startScreen, #experimentContainer { position: fixed; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 16px; }
+    #experimentContainer { display: none; }
+    #participantInput, #sessionInput { padding: 10px 14px; font-size: 18px; border-radius: 6px; border: 1px solid #333; min-width: 260px; }
+    #startButton { padding: 12px 24px; font-size: 18px; border-radius: 6px; border: none; background: #2c7be5; color: #fff; cursor: pointer; }
+    #startButton:disabled { background: #777; cursor: not-allowed; }
+    #canvasWrapper { position: relative; width: 100vw; height: 100vh; }
+    canvas { width: 100%; height: 100%; display: block; background: #888; }
+    #feedbackOverlay { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 48px; font-weight: bold; text-shadow: 0 0 10px rgba(0,0,0,0.5); pointer-events: none; opacity: 0; transition: opacity 0.1s ease; }
+    #responseButtons { position: fixed; bottom: 32px; left: 50%; transform: translateX(-50%); display: flex; gap: 16px; z-index: 10; }
+    #responseButtons button { padding: 14px 24px; font-size: 18px; border-radius: 999px; border: none; background: rgba(0,0,0,0.6); color: #fff; min-width: 140px; cursor: pointer; transition: background 0.2s ease; }
+    #responseButtons button:active { background: rgba(0,0,0,0.8); }
+    #exitButton, #downloadButton { position: fixed; top: 20px; padding: 10px 18px; font-size: 16px; border: none; border-radius: 999px; color: #fff; cursor: pointer; z-index: 12; display: none; }
+    #exitButton { left: 20px; background: rgba(220, 53, 69, 0.9); }
+    #downloadButton { right: 20px; background: rgba(40, 167, 69, 0.9); }
+    #waitOverlay { position: fixed; inset: 0; background: rgba(0,0,0,0.65); color: #fff; display: none; align-items: center; justify-content: center; text-align: center; padding: 20px; z-index: 20; }
+    #waitOverlay.visible { display: flex; }
+    #waitOverlay .wait-box { background: rgba(0,0,0,0.55); padding: 28px 36px; border-radius: 16px; max-width: 560px; line-height: 1.5; font-size: 20px; }
+    #waitOverlay button { margin-top: 18px; padding: 12px 32px; border: none; border-radius: 999px; font-size: 18px; background: #2c7be5; color: #fff; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="startScreen">
+    <label for="participantInput">被试编号</label>
+    <input id="participantInput" type="text" autocomplete="off" />
+    <label for="sessionInput">Session (1 或 2)</label>
+    <input id="sessionInput" type="number" min="1" max="2" />
+    <button id="startButton">开始</button>
+    <p style="max-width: 460px; text-align: center; line-height: 1.4; font-size: 14px; color: #222;">点击“开始”进入 II 规则的 Gabor 分类实验。作答可按键 A/B，或点击屏幕下方的按钮。随时按下 Escape 可终止并下载数据。</p>
+  </div>
+  <div id="experimentContainer">
+    <div id="canvasWrapper">
+      <canvas id="gaborCanvas"></canvas>
+      <div id="feedbackOverlay"></div>
+    </div>
+    <div id="responseButtons">
+      <button class="responseButton" data-key="a">选择 A 类（键盘 A）</button>
+      <button class="responseButton" data-key="b">选择 B 类（键盘 B）</button>
+    </div>
+  </div>
+  <button id="exitButton">退出实验</button>
+  <button id="downloadButton">重新下载数据</button>
+  <div id="waitOverlay">
+    <div class="wait-box">
+      <div id="waitOverlayText">请按任意键继续。</div>
+      <button id="waitOverlayButton">点击继续</button>
+    </div>
+  </div>
+  <script>
+    // -------------------------
+    // Configurable constants
+    // -------------------------
+    const TRAIN_BLOCK_COUNT = 8;
+    const TRIALS_PER_BLOCK = 50;
+    const TRAIN_TOTAL = TRAIN_BLOCK_COUNT * TRIALS_PER_BLOCK; // 400
+    const GEN_TOTAL = 40;
+    const USE_FIXATION = true, FIX_MS = 500;
+    const USE_PREBLANK = false, PREBLANK_MS = 0;
+    const RESP_LIMIT_MS = 3000;
+    const FEEDBACK_MS = 500;
+    const DELAYED_MS = 2000; // group B only during training
+    const SEED_BASE = 123456789;
+    const GAUSS_DISTANCE = 9; // between class means along optimal axis
+    const GAUSS_VAR_OPT = 30;
+    const GAUSS_VAR_ORTH = 300;
+    const OPTIMAL_RANGE = 100; // latent x,y nominal span
+    const SF_MIN = 2.0, SF_MAX = 8.0;
+    const ORI_MIN = -60, ORI_MAX = 60;
+    // -------------------------
+    // DOM references
+    // -------------------------
+    const startScreen = document.getElementById('startScreen');
+    const participantInput = document.getElementById('participantInput');
+    const sessionInput = document.getElementById('sessionInput');
+    const startButton = document.getElementById('startButton');
+    const experimentContainer = document.getElementById('experimentContainer');
+    const canvas = document.getElementById('gaborCanvas');
+    const ctx = canvas.getContext('2d');
+    const feedbackOverlay = document.getElementById('feedbackOverlay');
+    const responseButtons = document.querySelectorAll('.responseButton');
+    const exitButton = document.getElementById('exitButton');
+    const downloadButton = document.getElementById('downloadButton');
+    const waitOverlay = document.getElementById('waitOverlay');
+    const waitOverlayText = document.getElementById('waitOverlayText');
+    const waitOverlayButton = document.getElementById('waitOverlayButton');
 
+    let displayWidth = window.innerWidth;
+    let displayHeight = window.innerHeight;
+
+    // -------------------------
+    // RNG utilities (seeded LCG)
+    // -------------------------
+    function makeLCG(seed) {
+      let state = seed >>> 0;
+      return () => {
+        state = (1664525 * state + 1013904223) >>> 0;
+        return state / 0x100000000;
+      };
+    }
+
+    function gaussianPair(rng) {
+      const u1 = Math.max(rng(), 1e-8);
+      const u2 = rng();
+      const mag = Math.sqrt(-2 * Math.log(u1));
+      const z0 = mag * Math.cos(2 * Math.PI * u2);
+      const z1 = mag * Math.sin(2 * Math.PI * u2);
+      return [z0, z1];
+    }
+
+    // -------------------------
+    // Stimulus generation helpers
+    // -------------------------
+    function mapToRange(value, min, max) {
+      const norm = Math.min(1, Math.max(0, 0.5 + value / OPTIMAL_RANGE));
+      return min + (max - min) * norm;
+    }
+
+    function quantizeSf(sf) {
+      return Math.min(SF_MAX, Math.max(SF_MIN, Math.round(sf * 10) / 10));
+    }
+
+    function sampleStimulus(rng, meanVec, covL) {
+      const [z0, z1] = gaussianPair(rng);
+      const x = meanVec[0] + covL[0] * z0 + covL[1] * z1;
+      const y = meanVec[1] + covL[3] * z0 + covL[4] * z1;
+      const sf = quantizeSf(mapToRange(x, SF_MIN, SF_MAX));
+      const magOri = mapToRange(y, 0, Math.abs(ORI_MAX));
+      const sign = rng() < 0.5 ? -1 : 1;
+      const ori = sign * magOri;
+      const s = sf - 4.5;
+      const o = Math.abs(ori) - 10;
+      const d = s * o;
+      return { sf, ori, d };
+    }
+
+    function buildCovL(angleRad) {
+      const cosA = Math.cos(angleRad);
+      const sinA = Math.sin(angleRad);
+      // Rotate diag variances and return Cholesky-like lower for sampling
+      const vOpt = GAUSS_VAR_OPT;
+      const vOrth = GAUSS_VAR_ORTH;
+      const a11 = cosA * Math.sqrt(vOpt);
+      const a12 = -sinA * Math.sqrt(vOrth);
+      const a21 = sinA * Math.sqrt(vOpt);
+      const a22 = cosA * Math.sqrt(vOrth);
+      return [a11, a12, 0, a21, a22];
+    }
+
+    function buildMeans(angleRad) {
+      const dx = (GAUSS_DISTANCE / 2) * Math.cos(angleRad);
+      const dy = (GAUSS_DISTANCE / 2) * Math.sin(angleRad);
+      return {
+        A: [dx, dy],
+        B: [-dx, -dy]
+      };
+    }
+
+    function labelII(stim, invert) {
+      const base = stim.d >= 0 ? 'A' : 'B';
+      if (!invert) return base;
+      return base === 'A' ? 'B' : 'A';
+    }
+
+    function generateIISet(sessionIndex, phase) {
+      const angle = sessionIndex === 2 ? -Math.PI / 4 : Math.PI / 4;
+      const means = buildMeans(angle);
+      const covL = buildCovL(angle);
+      const rng = makeLCG(SEED_BASE + sessionIndex + (phase === 'gen' ? 999 : 0));
+      const invert = sessionIndex === 2; // II2 mirrors II1 via label flip
+      const total = phase === 'train' ? TRAIN_TOTAL : GEN_TOTAL;
+      const perClass = total / 2;
+      const stim = [];
+      while (stim.length < total) {
+        const target = stim.length < perClass ? 'A' : 'B';
+        const mean = target === 'A' ? means.A : means.B;
+        const sample = sampleStimulus(rng, [mean[0], mean[1]], covL);
+        const lbl = labelII(sample, invert);
+        if (lbl !== target) continue; // keep classes balanced by sampling until label matches target
+        stim.push({ sf: sample.sf, ori: sample.ori, label: lbl, catType: sessionIndex === 1 ? 'II1' : 'II2', phase });
+      }
+      return stim;
+    }
+
+    function chunkBlocks(stimuli, blockSize) {
+      const blocks = [];
+      const copy = [...stimuli];
+      // enforce per-block balance
+      const aQueue = copy.filter(s => s.label === 'A');
+      const bQueue = copy.filter(s => s.label === 'B');
+      for (let i = 0; i < copy.length / blockSize; i++) {
+        const block = [];
+        for (let j = 0; j < blockSize / 2; j++) block.push(aQueue.shift());
+        for (let j = 0; j < blockSize / 2; j++) block.push(bQueue.shift());
+        for (let k = block.length - 1; k > 0; k--) {
+          const idx = Math.floor(Math.random() * (k + 1));
+          [block[k], block[idx]] = [block[idx], block[k]];
+        }
+        blocks.push(block);
+      }
+      return blocks;
+    }
+
+    function qcSingleDim(stimuli) {
+      const labels = stimuli.map(s => s.label);
+      const sfVals = stimuli.map(s => s.sf);
+      const oriVals = stimuli.map(s => Math.abs(s.ori));
+      function best1DAcc(values) {
+        const pairs = values.map((v, i) => ({ v, label: labels[i] })).sort((a, b) => a.v - b.v);
+        const unique = [...new Set(pairs.map(p => p.v))];
+        if (unique.length <= 1) return 1;
+        const thresholds = [];
+        for (let i = 0; i < unique.length - 1; i++) thresholds.push((unique[i] + unique[i + 1]) / 2);
+        let best = 0;
+        thresholds.forEach(t => {
+          let corr1 = 0, corr2 = 0;
+          pairs.forEach(p => {
+            const ruleA = p.v <= t ? 'A' : 'B';
+            const ruleB = p.v <= t ? 'B' : 'A';
+            if (ruleA === p.label) corr1++;
+            if (ruleB === p.label) corr2++;
+          });
+          best = Math.max(best, corr1 / pairs.length, corr2 / pairs.length);
+        });
+        return best;
+      }
+      return { maxSfAcc: best1DAcc(sfVals), maxOriAcc: best1DAcc(oriVals) };
+    }
+
+    function buildStimuli(sessionIndex) {
+      const train = generateIISet(sessionIndex, 'train');
+      let qc = qcSingleDim(train);
+      let tries = 0;
+      let best = train;
+      let bestScore = Math.max(qc.maxSfAcc, qc.maxOriAcc);
+      while ((qc.maxSfAcc > 0.6 || qc.maxOriAcc > 0.6) && tries < 500) {
+        tries++;
+        const candidate = generateIISet(sessionIndex, 'train');
+        const cqc = qcSingleDim(candidate);
+        const score = Math.max(cqc.maxSfAcc, cqc.maxOriAcc);
+        if (score < bestScore) { bestScore = score; best = candidate; qc = cqc; }
+        if (score <= 0.6) { best = candidate; qc = cqc; break; }
+      }
+      if (qc.maxSfAcc > 0.6 || qc.maxOriAcc > 0.6) {
+        console.warn('II single-dimension QC not fully met, using best candidate', qc);
+      }
+      const gen = generateIISet(sessionIndex, 'gen');
+      return { train: best, gen };
+    }
+
+    // -------------------------
+    // Rendering helpers
+    // -------------------------
+    function resizeCanvas() {
+      const ratio = window.devicePixelRatio || 1;
+      displayWidth = window.innerWidth;
+      displayHeight = window.innerHeight;
+      canvas.width = Math.round(displayWidth * ratio);
+      canvas.height = Math.round(displayHeight * ratio);
+      canvas.style.width = displayWidth + 'px';
+      canvas.style.height = displayHeight + 'px';
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    }
+
+    function drawBackground() { ctx.fillStyle = '#888'; ctx.fillRect(0, 0, displayWidth, displayHeight); }
+
+    function drawFixation() {
+      drawBackground();
+      const cx = displayWidth / 2, cy = displayHeight / 2;
+      const ratio = window.devicePixelRatio || 1;
+      ctx.strokeStyle = '#111';
+      ctx.lineWidth = 4 / ratio;
+      const size = Math.min(displayWidth, displayHeight) * 0.02;
+      ctx.beginPath();
+      ctx.moveTo(cx - size, cy); ctx.lineTo(cx + size, cy);
+      ctx.moveTo(cx, cy - size); ctx.lineTo(cx, cy + size);
+      ctx.stroke();
+    }
+
+    function drawGabor(ctx, cx, cy, diameterPx, oriDeg, sfPairs) {
+      const size = Math.max(8, Math.round(diameterPx));
+      const off = document.createElement('canvas');
+      off.width = size; off.height = size;
+      const octx = off.getContext('2d');
+      const imageData = octx.createImageData(size, size);
+      const data = imageData.data;
+      const radius = size / 2;
+      const orientation = oriDeg * Math.PI / 180;
+      const cycles = sfPairs / 2; // visible black+white pairs
+      const freq = cycles / size;
+      const cosOri = Math.cos(orientation);
+      const sinOri = Math.sin(orientation);
+      const sigma = radius * 0.45;
+      const twoSigmaSq = 2 * sigma * sigma;
+      const base = 128; const amp = 110;
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const dx = x - radius + 0.5; const dy = y - radius + 0.5;
+          const distSq = dx * dx + dy * dy;
+          const idx = (y * size + x) * 4;
+          if (distSq > radius * radius) { data[idx] = data[idx+1] = data[idx+2] = 136; data[idx+3] = 255; continue; }
+          const rotX = dx * cosOri + dy * sinOri;
+          const sine = Math.cos(2 * Math.PI * freq * rotX);
+          const gaussian = Math.exp(-distSq / twoSigmaSq);
+          const val = Math.min(255, Math.max(0, Math.round(base + gaussian * amp * sine)));
+          data[idx] = data[idx+1] = data[idx+2] = val; data[idx+3] = 255;
+        }
+      }
+      octx.putImageData(imageData, 0, 0);
+      ctx.drawImage(off, cx - radius, cy - radius);
+      ctx.strokeStyle = '#000';
+      const ratio = window.devicePixelRatio || 1;
+      ctx.lineWidth = Math.max(2, size * 0.03) / ratio;
+      ctx.beginPath(); ctx.arc(cx, cy, radius - ctx.lineWidth / 2, 0, Math.PI * 2); ctx.stroke();
+    }
+
+    function renderStimulus(sf, ori) {
+      drawBackground();
+      const diameter = Math.min(displayWidth, displayHeight) * 0.36;
+      drawGabor(ctx, displayWidth / 2, displayHeight / 2, diameter, ori, sf);
+    }
+
+    // -------------------------
+    // Experiment state
+    // -------------------------
+    let participantId = '';
+    let sessionIndex = 1;
+    let movement = 'Seated';
+    let dataRows = [];
+    let currentStimuli = null;
+    let experimentRunning = false;
+    let aborted = false;
+    let responseState = null;
+    let pendingDownload = false;
+    let lastFilename = '';
+    let delayMs = 0;
+
+    function resetState() {
+      dataRows = [];
+      aborted = false;
+      pendingDownload = false;
+      lastFilename = '';
+    }
+
+    // -------------------------
+    // Overlays
+    // -------------------------
+    function showFeedback(text, color) { feedbackOverlay.textContent = text; feedbackOverlay.style.color = color; feedbackOverlay.style.opacity = 1; }
+    function hideFeedback() { feedbackOverlay.style.opacity = 0; }
+    function drawBlank() { drawBackground(); }
+
+    function showWait(message, allowSkip = true, autoDuration = null) {
+      waitOverlayText.textContent = message;
+      waitOverlay.classList.add('visible');
+      return new Promise(resolve => {
+        let timer = null;
+        const finish = () => {
+          if (timer) clearTimeout(timer);
+          document.removeEventListener('keydown', handler, true);
+          document.removeEventListener('pointerdown', handler, true);
+          waitOverlayButton.removeEventListener('click', finish, true);
+          waitOverlay.classList.remove('visible');
+          resolve();
+        };
+        const handler = (e) => { if (!allowSkip) return; e.preventDefault(); finish(); };
+        if (allowSkip) {
+          document.addEventListener('keydown', handler, true);
+          document.addEventListener('pointerdown', handler, true);
+          waitOverlayButton.addEventListener('click', finish, true);
+        }
+        if (autoDuration != null) timer = setTimeout(finish, autoDuration);
+      });
+    }
+
+    function setExitVisibility(show) { exitButton.style.display = show ? 'block' : 'none'; }
+    function setDownloadVisibility(show) { downloadButton.style.display = show ? 'block' : 'none'; }
+
+    // -------------------------
+    // Response handling
+    // -------------------------
+    function waitForResponse() {
+      return new Promise(resolve => {
+        const start = performance.now();
+        const timer = setTimeout(() => { responseState = null; resolve({ resp: 'NA', rtMs: null, timeout: true }); }, RESP_LIMIT_MS);
+        responseState = { resolve, timer, start };
+      });
+    }
+    function clearResponseState() { if (responseState) { clearTimeout(responseState.timer); responseState = null; } }
+    function deliverResponse(key) {
+      if (!responseState) return;
+      if (key !== 'a' && key !== 'b') return;
+      const rtMs = performance.now() - responseState.start;
+      clearTimeout(responseState.timer);
+      const resolve = responseState.resolve; responseState = null;
+      resolve({ resp: key, rtMs, timeout: false });
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); if (experimentRunning && !aborted) { aborted = true; conclude(true); } return; }
+      if (!experimentRunning) return;
+      deliverResponse(e.key.toLowerCase());
+    });
+    responseButtons.forEach(btn => {
+      const key = btn.getAttribute('data-key');
+      btn.addEventListener('click', () => deliverResponse(key));
+      btn.addEventListener('touchstart', (e) => { e.preventDefault(); deliverResponse(key); }, { passive: false });
+    });
+
+    exitButton.addEventListener('click', () => { if (!experimentRunning) return; aborted = true; conclude(true); });
+    downloadButton.addEventListener('click', () => { if (dataRows.length === 0) return; downloadCSV(lastFilename || buildFilename(), dataRows); });
+
+    // -------------------------
+    // CSV
+    // -------------------------
+    function buildFilename() { return `gabor_${participantId || 'anon'}_${new Date().toISOString().replace(/[:.]/g,'-')}.csv`; }
+    function buildCSV(rows) {
+      const header = ['participant','session','movement','phase','block','trial','sf','ori','label','resp','corr','rt','delayMs','trialStartUTC'];
+      const out = [header.join(',')];
+      rows.forEach(r => {
+        const line = r.map(v => {
+          const s = v == null ? '' : String(v);
+          return (s.includes(',') || s.includes('"') || s.includes('\n')) ? '"' + s.replace(/"/g,'""') + '"' : s;
+        }).join(',');
+        out.push(line);
+      });
+      return out.join('\n');
+    }
+    function downloadCSV(filename, rows) {
+      const csv = buildCSV(rows);
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+      lastFilename = filename;
+      setDownloadVisibility(true);
+    }
+
+    // -------------------------
+    // Trial runner
+    // -------------------------
+    async function runTrial(trial, blockLabel, isGen) {
+      const trialStart = new Date().toISOString();
+      if (USE_FIXATION) { drawFixation(); await wait(FIX_MS); }
+      if (USE_PREBLANK) { drawBlank(); await wait(PREBLANK_MS); }
+      renderStimulus(trial.sf, trial.ori);
+      const response = await waitForResponse();
+      clearResponseState();
+      drawBlank();
+      const isDelayed = !isGen && delayMs > 0;
+      if (isDelayed) { await wait(delayMs); drawBlank(); }
+      let rtSec = response.timeout ? '' : (response.rtMs / 1000).toFixed(3);
+      let respKey = response.timeout ? 'NA' : response.resp;
+      const corr = respKey === (trial.label === 'A' ? 'a' : 'b') ? 1 : 0;
+      if (!isGen) {
+        showFeedback(corr ? 'Right' : 'Wrong', corr ? '#2ecc71' : '#e74c3c');
+        await wait(FEEDBACK_MS);
+        hideFeedback();
+      }
+      dataRows.push([participantId, sessionIndex, movement, isGen ? 'gen' : 'train', blockLabel, trial.index, trial.sf.toFixed(2), trial.ori.toFixed(2), trial.label, respKey, corr, rtSec, isGen ? 0 : delayMs, trialStart]);
+    }
+
+    async function runBlock(blockTrials, blockLabel, isGen) {
+      for (const trial of blockTrials) {
+        if (aborted) break;
+        await runTrial(trial, blockLabel, isGen);
+      }
+    }
+
+    async function runExperiment() {
+      experimentRunning = true;
+      setExitVisibility(true);
+      resizeCanvas(); drawBlank();
+      window.addEventListener('resize', resizeCanvas);
+      const trainingBlocks = chunkBlocks(currentStimuli.train, TRIALS_PER_BLOCK);
+      for (let b = 0; b < trainingBlocks.length; b++) {
+        await runBlock(trainingBlocks[b].map((t, idx) => ({ ...t, index: idx + 1 + b * TRIALS_PER_BLOCK })), `Train-${b+1}`, false);
+        if (aborted) break;
+        if (b < trainingBlocks.length - 1) { await showWait('休息一下，按“继续”开始下一段训练。'); }
+      }
+      if (!aborted) {
+        await showWait('即将进入无反馈测试阶段，5 秒后自动继续。', false, 5000);
+        const genTrials = currentStimuli.gen.map((t, idx) => ({ ...t, index: TRAIN_TOTAL + idx + 1 }));
+        await runBlock(genTrials, 'Generalization', true);
+      }
+      conclude(false);
+    }
+
+    function wait(ms) { return new Promise(res => setTimeout(res, ms)); }
+
+    function conclude(forceAbort) {
+      experimentRunning = false;
+      setExitVisibility(false);
+      clearResponseState();
+      hideFeedback();
+      waitOverlay.classList.remove('visible');
+      const filename = buildFilename();
+      if (dataRows.length > 0) downloadCSV(filename, dataRows);
+      drawBlank();
+      ctx.fillStyle = '#fff';
+      ctx.font = '28px Arial';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(forceAbort ? '实验已终止，数据已下载。' : '感谢参与，数据已下载。', displayWidth/2, displayHeight/2);
+    }
+
+    // -------------------------
+    // Start handler
+    // -------------------------
+    startButton.addEventListener('click', async () => {
+      participantId = participantInput.value.trim();
+      const sessionVal = Number(sessionInput.value);
+      if (!participantId || ![1,2].includes(sessionVal)) { alert('请输入被试编号并选择 Session 1 或 2。'); return; }
+      sessionIndex = sessionVal;
+      movement = (participantId.startsWith('1')) ? 'Walking' : (participantId.startsWith('2') ? 'Seated' : 'Seated');
+      delayMs = participantId.toUpperCase().startsWith('B') ? DELAYED_MS : 0;
+      resetState();
+      // Generate session-dependent mirrored stimuli
+      currentStimuli = buildStimuli(sessionIndex);
+      startScreen.style.display = 'none';
+      experimentContainer.style.display = 'flex';
+      setDownloadVisibility(false);
+      if (document.fullscreenEnabled) { try { await document.documentElement.requestFullscreen(); } catch (e) { console.warn('fullscreen failed'); } }
+      runExperiment();
+    });
+
+    window.addEventListener('load', () => { resizeCanvas(); drawBlank(); });
+    document.addEventListener('fullscreenchange', () => { if (!document.fullscreenElement && experimentRunning) console.log('已退出全屏'); });
+  </script>
+</body>
+</html>
