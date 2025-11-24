@@ -71,7 +71,7 @@
     const GAUSS_DISTANCE = 9; // between class means along optimal axis
     const GAUSS_VAR_OPT = 30;
     const GAUSS_VAR_ORTH = 300;
-    const OPTIMAL_RANGE = 100; // latent x,y nominal span
+    const OPTIMAL_RANGE = 100; // latent x,y nominal span mapped to [0,100]
     const SF_MIN = 2.0, SF_MAX = 8.0;
     const ORI_MIN = -60, ORI_MAX = 60;
     // -------------------------
@@ -118,8 +118,9 @@
     // -------------------------
     // Stimulus generation helpers
     // -------------------------
+    // Map a latent value assumed around 50±spread onto the physical range.
     function mapToRange(value, min, max) {
-      const norm = Math.min(1, Math.max(0, 0.5 + value / OPTIMAL_RANGE));
+      const norm = Math.min(1, Math.max(0, value / OPTIMAL_RANGE));
       return min + (max - min) * norm;
     }
 
@@ -132,7 +133,7 @@
       const x = meanVec[0] + covL[0] * z0 + covL[1] * z1;
       const y = meanVec[1] + covL[3] * z0 + covL[4] * z1;
       const sf = quantizeSf(mapToRange(x, SF_MIN, SF_MAX));
-      const magOri = mapToRange(y, 0, Math.abs(ORI_MAX));
+      const magOri = mapToRange(Math.abs(y), 0, Math.abs(ORI_MAX));
       const sign = rng() < 0.5 ? -1 : 1;
       const ori = sign * magOri;
       const s = sf - 4.5;
@@ -157,9 +158,11 @@
     function buildMeans(angleRad) {
       const dx = (GAUSS_DISTANCE / 2) * Math.cos(angleRad);
       const dy = (GAUSS_DISTANCE / 2) * Math.sin(angleRad);
+      const cx = OPTIMAL_RANGE / 2; // center the Gaussians around 50 in latent space
+      const cy = OPTIMAL_RANGE / 2;
       return {
-        A: [dx, dy],
-        B: [-dx, -dy]
+        A: [cx + dx, cy + dy],
+        B: [cx - dx, cy - dy]
       };
     }
 
