@@ -135,9 +135,9 @@
     const FEEDBACK_MS = 500;
     const DELAYED_MS = 2000; // group B only during training
     const SEED_BASE = 123456789;
-    const GAUSS_DISTANCE = 12; // separation along optimal axis in latent space
+    const GAUSS_DISTANCE = 5; // tighter separation to boost SF/ori overlap
     const GAUSS_VAR_OPT = 15;
-    const GAUSS_VAR_ORTH = 400;
+    const GAUSS_VAR_ORTH = 600; // elongated orthogonal spread to reduce 1D diagnosability
     const OPTIMAL_RANGE = 100; // latent x,y nominal span mapped to [0,100]
     const SF_MIN = 2.0, SF_MAX = 8.0;
     const ORI_MIN = -60, ORI_MAX = 60;
@@ -365,7 +365,7 @@
     }
 
     function drawGabor(ctx, cx, cy, diameterPx, oriDeg, sfCycles) {
-      const size = Math.max(8, Math.round(diameterPx));
+      const size = 400; // fixed large patch to reveal full cycles
       const off = document.createElement('canvas');
       off.width = size; off.height = size;
       const octx = off.getContext('2d');
@@ -377,7 +377,7 @@
       const freq = sfCycles / size;
       const cosOri = Math.cos(orientation);
       const sinOri = Math.sin(orientation);
-      const sigma = radius * 0.45;
+      const sigma = 80; // wider Gaussian window to avoid clipping outer stripes
       const twoSigmaSq = 2 * sigma * sigma;
       const base = 128; const amp = 110;
       for (let y = 0; y < size; y++) {
