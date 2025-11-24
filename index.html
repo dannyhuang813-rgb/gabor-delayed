@@ -18,7 +18,7 @@
       gap: 16px;
     }
     #startScreen {
-      z-index: 50;
+      z-index: 9999;
       background: #808080;
     }
     #experimentContainer { display: none; }
@@ -135,13 +135,14 @@
     const FEEDBACK_MS = 500;
     const DELAYED_MS = 2000; // group B only during training
     const SEED_BASE = 123456789;
-    const GAUSS_DISTANCE = 5; // tighter separation to boost SF/ori overlap
-    const GAUSS_VAR_OPT = 15;
-    const GAUSS_VAR_ORTH = 600; // elongated orthogonal spread to reduce 1D diagnosability
+    // II 线性结构参数：两个宽椭圆，中心距离 14、宽度 45、长度 350，旋转按 session 镜像
+    const GAUSS_DISTANCE = 14; // 更宽的中心间距，形成清晰分离的椭圆云
+    const GAUSS_VAR_OPT = 45;  // 椭圆宽度（越大越“肥”）
+    const GAUSS_VAR_ORTH = 350; // 椭圆长度（沿主轴拉长）
     const OPTIMAL_RANGE = 100; // latent x,y nominal span mapped to [0,100]
     const SF_MIN = 2.0, SF_MAX = 8.0;
     const ORI_MIN = -60, ORI_MAX = 60;
-    const SINGLE_DIM_MAX = 0.6; // sf-only or |ori|-only ceiling
+    const SINGLE_DIM_MAX = 0.7; // sf-only 或 ori-only 的上限，保持一定重叠但仍需整合
 
     // -------------------------
     // DOM references
@@ -238,10 +239,8 @@
       const xLatent = meanVec[0] + covL[0] * z0 + covL[1] * z1;
       const yLatent = meanVec[1] + covL[3] * z0 + covL[4] * z1;
       const sf = mapToRange(xLatent, SF_MIN, SF_MAX);
-      const magOri = mapToRange(Math.abs(yLatent), 0, Math.abs(ORI_MAX));
-      const sign = rng() < 0.5 ? -1 : 1;
-      const ori = sign * magOri;
-      return { sf, ori, x: xLatent, y: Math.abs(yLatent) };
+      const ori = mapToRange(yLatent, ORI_MIN, ORI_MAX); // 不取绝对值，保持线性映射
+      return { sf, ori, x: xLatent, y: yLatent };
     }
 
     function labelII(stim, rule) {
@@ -272,7 +271,7 @@
     function qcSingleDim(stimuli) {
       const labels = stimuli.map(s => s.label);
       const sfVals = stimuli.map(s => s.sf);
-      const oriVals = stimuli.map(s => Math.abs(s.ori));
+      const oriVals = stimuli.map(s => s.ori); // 使用原始 ori，避免绝对值导致对称化
       return { maxSfAcc: best1DAcc(sfVals, labels), maxOriAcc: best1DAcc(oriVals, labels) };
     }
 
@@ -365,7 +364,7 @@
     }
 
     function drawGabor(ctx, cx, cy, diameterPx, oriDeg, sfCycles) {
-      const size = 400; // fixed large patch to reveal full cycles
+      const size = 300; // fixed patch; sf directly maps to cycles via freq = sf / size
       const off = document.createElement('canvas');
       off.width = size; off.height = size;
       const octx = off.getContext('2d');
