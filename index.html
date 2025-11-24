@@ -135,14 +135,14 @@
     const FEEDBACK_MS = 500;
     const DELAYED_MS = 2000; // group B only during training
     const SEED_BASE = 123456789;
-    // II 线性结构参数：两个宽椭圆，中心距离 14、宽度 45、长度 350，旋转按 session 镜像
-    const GAUSS_DISTANCE = 14; // 更宽的中心间距，形成清晰分离的椭圆云
-    const GAUSS_VAR_OPT = 45;  // 椭圆宽度（越大越“肥”）
-    const GAUSS_VAR_ORTH = 350; // 椭圆长度（沿主轴拉长）
+    // II 线性结构参数：长雪茄形椭圆，中心距离 16、宽度 20、长度 600，旋转按 session 镜像
+    const GAUSS_DISTANCE = 16; // 加大间隙，形成更明显的分界
+    const GAUSS_VAR_OPT = 20;  // 窄宽度，形成细长雪茄
+    const GAUSS_VAR_ORTH = 600; // 极度拉长以增大轴向重叠，压低单维可诊断性
     const OPTIMAL_RANGE = 100; // latent x,y nominal span mapped to [0,100]
     const SF_MIN = 2.0, SF_MAX = 8.0;
     const ORI_MIN = -60, ORI_MAX = 60;
-    const SINGLE_DIM_MAX = 0.7; // sf-only 或 ori-only 的上限，保持一定重叠但仍需整合
+    const SINGLE_DIM_MAX = 0.65; // sf-only 或 ori-only 的上限，要求单维准确率 <65%
 
     // -------------------------
     // DOM references
@@ -368,7 +368,10 @@
       const off = document.createElement('canvas');
       off.width = size; off.height = size;
       const octx = off.getContext('2d');
-      const imageData = octx.createImageData(size, size);
+      // 先用与背景一致的灰色填充，保证边缘衔接
+      octx.fillStyle = '#808080';
+      octx.fillRect(0, 0, size, size);
+      const imageData = octx.getImageData(0, 0, size, size);
       const data = imageData.data;
       const radius = size / 2;
       const orientation = oriDeg * Math.PI / 180;
@@ -376,7 +379,7 @@
       const freq = sfCycles / size;
       const cosOri = Math.cos(orientation);
       const sinOri = Math.sin(orientation);
-      const sigma = 80; // wider Gaussian window to avoid clipping outer stripes
+      const sigma = 90; // 更宽的包络，确保边缘平滑渐隐
       const twoSigmaSq = 2 * sigma * sigma;
       const base = 128; const amp = 110;
       for (let y = 0; y < size; y++) {
@@ -384,12 +387,13 @@
           const dx = x - radius + 0.5; const dy = y - radius + 0.5;
           const distSq = dx * dx + dy * dy;
           const idx = (y * size + x) * 4;
-          if (distSq > radius * radius) { data[idx] = data[idx+1] = data[idx+2] = 136; data[idx+3] = 255; continue; }
+          if (distSq > radius * radius) { data[idx+3] = 0; continue; }
           const rotX = dx * cosOri + dy * sinOri;
           const sine = Math.cos(2 * Math.PI * freq * rotX);
           const gaussian = Math.exp(-distSq / twoSigmaSq);
           const val = Math.min(255, Math.max(0, Math.round(base + gaussian * amp * sine)));
-          data[idx] = data[idx+1] = data[idx+2] = val; data[idx+3] = 255;
+          const alpha = Math.round(255 * gaussian);
+          data[idx] = data[idx+1] = data[idx+2] = val; data[idx+3] = alpha;
         }
       }
       octx.putImageData(imageData, 0, 0);
